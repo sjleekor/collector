@@ -1,0 +1,11 @@
+{
+  "OutBlock_1": [
+    {
+      "TRD_DD": "2026/04/17",
+      "CVSRTSELL_TRDVOL": "1,234",
+      "STR_CONST_VAL1": "999",
+      "CVSRTSELL_TRDVAL": "5,678,000",
+      "STR_CONST_VAL2": "45,000,000"
+    }
+  ]
+}

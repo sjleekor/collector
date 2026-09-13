@@ -1,0 +1,16 @@
+# Runtime config for the canonical/derived export (separate lake root).
+#
+# Output root differs from the raw lake so the raw export stays strictly raw.
+# DSN/secrets are read from the environment (DB_DSN), never from this file.
+# snapshot_date here is a default; pass --snapshot-date to override per run.
+
+[source]
+name = "local_mydb"
+dsn_env = "DB_DSN"
+schema = "public"
+read_only = true
+
+[output]
+root = "data_lake/canonical_postgres"
+snapshot_date = "2026-06-19"
+tmp_root = "data_lake/_tmp/canonical_export"

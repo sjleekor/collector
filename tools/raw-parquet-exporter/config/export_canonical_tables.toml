@@ -1,0 +1,72 @@
+# DEPRECATED (refactor §5.3). The derived facts here (stock_metric_fact,
+# common_feature_daily_fact) and the catalog/rule tables were decommissioned —
+# the DuckDB compute marts in research/etl/marts recompute them from the raw lake,
+# and the catalog/rule definitions now live in code (collector.kr.definitions).
+# This config + bin/canonical-parquet-export-all.sh are retained ONLY to
+# re-materialize a one-off pre-drop backup of the legacy canonical lake. Day-to-day
+# derived data comes from bin/parquet-compute-all.sh, not this export.
+#
+# Canonical / derived table export config (legacy).
+#
+# These tables are intentionally EXCLUDED from the strict-raw export
+# (see docs/dev/20260619_rust_exporter/raw_parquet_exporter_rust_plan.md §2.3).
+# They are normalized/derived facts that the model ETL reads directly, so they
+# are exported to a SEPARATE lake root (data_lake/canonical_postgres) to keep
+# the raw lake pure. No Rust changes are required: every column type here
+# (numeric -> Decimal128, jsonb/uuid -> ::text, timestamptz -> UTC) and the
+# full_table strategy with a simple integer/string partition are already
+# supported by the exporter.
+#
+# Run with:
+#   bin/canonical-parquet-export-all.sh --snapshot-date YYYY-MM-DD
+# or directly:
+#   raw-parquet-exporter export \
+#     --config tools/raw-parquet-exporter/config/export_canonical_tables.toml \
+#     --runtime <runtime.toml> --snapshot-date YYYY-MM-DD
+
+[defaults]
+compression = "zstd"
+row_group_rows = 131072
+target_file_bytes = 536870912
+db_read_connections = 2
+writer_workers = 4
+
+# --- canonical fact tables (model ETL reads these directly) ------------------
+
+[[tables]]
+name = "stock_metric_fact"
+priority = "P0"
+extract_strategy = "full_table"
+output_partitions = ["bsns_year"]
+order_by = ["ticker", "metric_code", "bsns_year", "reprt_code"]
+
+[[tables]]
+name = "common_feature_daily_fact"
+priority = "P0"
+extract_strategy = "full_table"
+output_partitions = []
+order_by = ["feature_date", "feature_code"]
+jsonb_columns = ["source_series_ids", "source_observation_ids"]
+
+# --- catalog tables (decode metric_code / feature_code; small, self-describing)
+
+[[tables]]
+name = "metric_catalog"
+priority = "P1"
+extract_strategy = "full_table"
+output_partitions = []
+order_by = ["metric_code"]
+
+[[tables]]
+name = "metric_mapping_rule"
+priority = "P1"
+extract_strategy = "full_table"
+output_partitions = []
+order_by = ["rule_code"]
+
+[[tables]]
+name = "common_feature_catalog"
+priority = "P1"
+extract_strategy = "full_table"
+output_partitions = []
+order_by = ["feature_code"]

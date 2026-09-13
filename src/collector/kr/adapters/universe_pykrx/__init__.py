@@ -1,0 +1,1 @@
+"""pykrx universe provider adapter."""

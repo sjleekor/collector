@@ -1,0 +1,26 @@
+{
+  "OutBlock_1": [
+    {
+      "ISU_CD": "005930",
+      "ISU_ABBRV": "삼성전자",
+      "SECUGRP_NM": "주권",
+      "CVSRTSELL_TRDVOL": "1,234",
+      "ACC_TRDVOL": "10,000",
+      "TRDVOL_WT": "12.34",
+      "CVSRTSELL_TRDVAL": "5,678,000",
+      "ACC_TRDVAL": "100,000,000",
+      "TRDVAL_WT": "5.68"
+    },
+    {
+      "ISU_CD": "000660",
+      "ISU_ABBRV": "SK하이닉스",
+      "SECUGRP_NM": "주권",
+      "CVSRTSELL_TRDVOL": "2,000",
+      "ACC_TRDVOL": "20,000",
+      "TRDVOL_WT": "10.00",
+      "CVSRTSELL_TRDVAL": "7,000,000",
+      "ACC_TRDVAL": "200,000,000",
+      "TRDVAL_WT": "3.50"
+    }
+  ]
+}

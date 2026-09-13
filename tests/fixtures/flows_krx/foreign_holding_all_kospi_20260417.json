@@ -1,0 +1,22 @@
+{
+  "output": [
+    {
+      "ISU_SRT_CD": "005930",
+      "ISU_ABBRV": "삼성전자",
+      "LIST_SHRS": "5,969,782,550",
+      "FORN_HD_QTY": "3,123,456,789",
+      "FORN_SHR_RT": "52.32",
+      "FORN_ORD_LMT_QTY": "5,969,782,550",
+      "FORN_LMT_EXHST_RT": "52.32"
+    },
+    {
+      "ISU_SRT_CD": "000660",
+      "ISU_ABBRV": "SK하이닉스",
+      "LIST_SHRS": "728,002,365",
+      "FORN_HD_QTY": "400,000,000",
+      "FORN_SHR_RT": "54.95",
+      "FORN_ORD_LMT_QTY": "728,002,365",
+      "FORN_LMT_EXHST_RT": "54.95"
+    }
+  ]
+}

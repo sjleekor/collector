@@ -1,0 +1,54 @@
+services:
+  db:
+    image: postgres:18.3
+    container_name: sdc-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-krx_data}
+      POSTGRES_USER: ${POSTGRES_USER:-krx_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+      TZ: Asia/Seoul
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-krx_user} -d ${POSTGRES_DB:-krx_data}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  collector:
+    image: ghcr.io/sjleekor/sdc:v0.13.0
+    profiles: ["manual"]
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env
+    # Every collector run is a fresh `docker compose run --rm` container. The
+    # KIS access token lasts a day and *every issuance sends the account holder
+    # a KakaoTalk notification*, so a cache inside the container would mean one
+    # notification per scheduled job. This is the only reason the service has a
+    # volume at all.
+    volumes:
+      - ./state:/state
+    environment:
+      KIS_TOKEN_CACHE_PATH: /state/kis_token.json
+      DB_DSN: ""
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-krx_data}
+      DB_USER: ${POSTGRES_USER:-krx_user}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_FORMAT: ${LOG_FORMAT:-plain}
+      RUN_MODE: ${RUN_MODE:-prod}
+      UNIVERSE_SOURCE_DEFAULT: ${UNIVERSE_SOURCE_DEFAULT:-fdr}
+      RATE_LIMIT_SECONDS: ${RATE_LIMIT_SECONDS:-0.2}
+      LONG_REST_INTERVAL: ${LONG_REST_INTERVAL:-100}
+      LONG_REST_SECONDS: ${LONG_REST_SECONDS:-10.0}
+      TZ: Asia/Seoul
+
+volumes:
+  postgres_data:

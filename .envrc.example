@@ -1,0 +1,13 @@
+# direnv 설정 틀. 복사해서 쓴다:
+#   cp .envrc.example .envrc && direnv allow
+#
+# 비밀은 .env에 두고 여기서 로드한다. 필요한 프로세스에만 전달된다.
+dotenv_if_exists .env
+
+# 비-비밀 설정은 코드(Settings)에 기본값이 있다.
+# 기본값과 다르게 쓸 때만 아래에 export 한다.
+# export LOG_LEVEL=DEBUG
+# export RATE_LIMIT_SECONDS=0.5
+
+# 데이터 루트. 시장은 코드가 인자로 받는다 (DataRoot.resolve(market=...)).
+export STOCK_DATA_ROOT="$PWD/../stock_data"

@@ -1,0 +1,10 @@
+[source]
+name = "local_mydb"
+dsn_env = "DB_DSN"
+schema = "public"
+read_only = true
+
+[output]
+root = "data_lake/raw_postgres"
+snapshot_date = "2026-06-19"
+tmp_root = "data_lake/_tmp/raw_export"

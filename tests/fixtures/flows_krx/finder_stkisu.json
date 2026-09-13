@@ -1,0 +1,20 @@
+{
+  "block1": [
+    {
+      "short_code": "005930",
+      "codeName": "삼성전자",
+      "full_code": "KR7005930003",
+      "marketCode": "STK",
+      "marketName": "유가증권",
+      "marketEngName": "KOSPI"
+    },
+    {
+      "short_code": "000660",
+      "codeName": "SK하이닉스",
+      "full_code": "KR7000660001",
+      "marketCode": "STK",
+      "marketName": "유가증권",
+      "marketEngName": "KOSPI"
+    }
+  ]
+}

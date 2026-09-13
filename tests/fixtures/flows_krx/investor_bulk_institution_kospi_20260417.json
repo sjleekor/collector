@@ -1,0 +1,14 @@
+{
+  "output": [
+    {
+      "ISU_SRT_CD": "005930",
+      "ISU_NM": "삼성전자",
+      "ASK_TRDVOL": "2,000",
+      "BID_TRDVOL": "1,000",
+      "NETBID_TRDVOL": "-1,000",
+      "ASK_TRDVAL": "20,000,000",
+      "BID_TRDVAL": "10,000,000",
+      "NETBID_TRDVAL": "-10,000,000"
+    }
+  ]
+}
