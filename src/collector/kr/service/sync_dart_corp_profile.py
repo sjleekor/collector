@@ -22,7 +22,7 @@ KRX index membership is not published and the KRX-to-KSIC crosswalk resolved
 only 36% of tickers 1:1, so versioning this endpoint monthly from now on is the
 only remaining route to a point-in-time industry.  It buys nothing for the
 past: the history starts the month it starts.  See
-``docs/dev/20260907_additional_feature/01_industry_pit.md`` §2.
+``../modeler/docs/dev/20260907_additional_feature/01_industry_pit.md`` §2.
 """
 
 from __future__ import annotations

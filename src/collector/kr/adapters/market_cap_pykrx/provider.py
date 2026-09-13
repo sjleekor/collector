@@ -4,7 +4,7 @@ Uses ``pykrx.stock.get_market_cap_by_ticker(date, market)`` — one call returns
 every listed stock on that date.
 
 Response shape (verified live against pykrx 1.2.8, 2026-08-15; see
-``docs/dev/20260731_raw_features/02_data_expansion_plan/poc/n1_pykrx_market_cap.md``):
+``../my/milestones/kr/modeling/dev/20260731_raw_features/02_data_expansion_plan/poc/n1_pykrx_market_cap.md``):
 
     >>> get_market_cap_by_ticker('20240102', market='KOSPI')
                 종가             시가총액       거래량           거래대금       상장주식수

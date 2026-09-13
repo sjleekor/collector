@@ -37,7 +37,7 @@ def default_metric_catalog() -> list[MetricCatalogEntry]:
         MetricCatalogEntry("total_equity", "총자본", "financial", "KRW", "자본총계"),
         # F-5.1. Five accounts measured on the 2026-09-08 lake before being
         # mapped; coverage tables and the two rejections are in
-        # docs/dev/20260907_additional_feature/poc/metric_rules_ext.md 6-8.
+        # ../modeler/docs/dev/20260907_additional_feature/poc/metric_rules_ext.md 6-8.
         MetricCatalogEntry(
             "current_assets", "유동자산", "financial", "KRW", "재무상태표 유동자산"
         ),
@@ -478,7 +478,7 @@ def default_metric_mapping_rules() -> list[MetricMappingRule]:
         # against `ifrs_Liabilities`'s 112,827. Mapping only `ifrs-full_` would
         # add nothing to the early years -- exactly the gap being closed. Both
         # spellings are listed for the same reason total_liabilities lists
-        # both. See docs/dev/20260907_additional_feature/poc/metric_rules_ext.md.
+        # both. See ../modeler/docs/dev/20260907_additional_feature/poc/metric_rules_ext.md.
         #
         # ifrs-full_InterestPaid / ifrs_InterestPaid carry no facts at all, so
         # only the ClassifiedAsOperatingActivities form is mapped.

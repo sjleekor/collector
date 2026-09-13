@@ -6,7 +6,7 @@ N3 (point-in-time universe) and the unadjusted OHLC K-7 needs all come from
 the same call.
 
 Response spec verified live on 2026-08-18 — see
-``docs/dev/20260731_raw_features/02_data_expansion_plan/poc/krx_open_api.md``
+``../my/milestones/kr/modeling/dev/20260731_raw_features/02_data_expansion_plan/poc/krx_open_api.md``
 §4.1c.
 """
 

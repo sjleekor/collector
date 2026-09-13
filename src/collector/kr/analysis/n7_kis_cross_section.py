@@ -53,7 +53,7 @@ class _DataRoot:
     base: Path
 
     @classmethod
-    def resolve(cls, market: str = "kr") -> "_DataRoot":
+    def resolve(cls, market: str = "kr") -> _DataRoot:
         root = os.environ.get("STOCK_DATA_ROOT")
         if not root:
             raise RuntimeError(
