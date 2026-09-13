@@ -40,7 +40,8 @@ coverage.xml
 logs/
 *.log
 
-# Local data outputs
-data/
-data_lake/
+# Local data outputs (repo-root only — a bare pattern also matches
+# src/collector/kr/infra/calendar/data/, which holds a real tracked file)
+/data/
+/data_lake/
 .tmp/
