@@ -9,14 +9,23 @@
 
 ## 현재 상태
 
-**뼈대만 있다 (2026-09-12).** Python 3.12 + `uv` 환경이 서 있고 CLI 진입점과 테스트가 통과한다.
-수집 로직은 아직 없다.
+**한국 시장 수집 코드가 들어와 있다 (2026-09-14, KR 분리 완료).** 버전 `0.14.1`.
+prod(sj2-server)가 `ghcr.io/sjleekor/collector:v0.14.1`로 정기 수집을 돌리는 중이다.
 
 ```
 src/collector/
 ├── cli/app.py     진입점 — `uv run collector`
-├── us/            미국 시장
-└── kr/            한국 시장 — stock_data_collector 에서 옮겨올 자리
+├── us/            미국 시장 — 뼈대만, 수집 로직은 아직 없다
+└── kr/            한국 시장 — 옛 stock_data_collector/krx_collector에서 옮겨옴
+    ├── adapters/  원천별 어댑터 (KRX·DART·KIS 등)
+    ├── domain/    도메인 타입
+    ├── service/   유스케이스
+    ├── infra/     DB·파일 I/O
+    ├── ports/     포트 인터페이스
+    ├── analysis/  수집 품질 검사
+    ├── cli/       `collector` 서브커맨드
+    ├── shared/    양쪽 시장이 쓰는 순수 타입
+    └── util/
 ```
 
 ```bash
@@ -29,17 +38,16 @@ uv run collector --help
 
 설정은 [`../CLAUDE.md`](../CLAUDE.md)의 공통 툴체인을 따른다. **프로젝트마다 다르게 잡지 않는다.**
 
-조사는 끝나 있다. 무엇을 어디서 어떻게 받을지는
+미국 시장 조사는 끝나 있다. 무엇을 어디서 어떻게 받을지는
 [`../my/milestones/us/research/`](../my/milestones/us/research/README.md)에 정리돼 있고,
 수집 설계는 [`90_collection_design.md`](../my/milestones/us/research/data/web_scraping/90_collection_design.md)에 있다.
 
-**저장소는 `sjleekor/collector`다** (2026-09-12 확정). 한국과 미국 수집 코드가 모두 여기
-들어간다. 그래서 이름에 시장이 없다.
+**저장소는 `sjleekor/collector`다.** 한국과 미국 수집 코드가 모두 여기 들어간다.
+그래서 이름에 시장이 없다.
 
-한국 시장 수집 코드는 `stock_data_collector/`에 있고 `src/collector/kr/`로 옮길 예정이다 —
-[분리 계획](../my/milestones/kr/refactoring/20260912_project_split/00_candidate_plan/README.md).
-옮겨오면서 패키지 이름이 `krx_collector`에서 `collector.kr`로 바뀌고(758곳 치환),
-`pyproject.toml`에 한국용 의존성이 합쳐진다. **prod 배포(sj2-server)도 이 저장소가 이어받는다.**
+한국 시장 코드는 패키지 이름이 `krx_collector`에서 `collector.kr`로 바뀌었다(758곳 치환).
+분리 경과는 [`../my/milestones/kr/refactoring/20260912_project_split/02_result.md`](../my/milestones/kr/refactoring/20260912_project_split/02_result.md)에 있다.
+`pyproject.toml`은 한국용 의존성을 base로 포함한다(시장별 extra로 안 나눈다). **prod 배포(sj2-server)를 이 저장소가 맡는다.**
 
 ---
 
@@ -75,5 +83,5 @@ uv run collector --help
 
 ## 아직 정해지지 않은 것
 
+- 미국 시장 수집 로직 자체 (지금은 뼈대만)
 - 데이터는 `../stock_data/<시장>/`에 있다 — `us/raw/`, `kr/raw/`. **경로를 코드에 박지 않고 환경변수로 받는다**
-- 한국 수집 코드가 `stock_data_collector/`에서 넘어올 때의 통합 방식
