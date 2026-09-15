@@ -17,8 +17,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
+      # 정확한 버전으로 고정한다. setup-uv는 v7 이후로 이동 major 태그를 안 내고
+      # (v7은 2026-03에 멈췄다), v6 이하는 Node 20이라 폐기 경고가 붙는다.
+      # 올릴 때는 손으로 올린다 — 이 워크플로가 prod 릴리스를 막는 게이트다.
       - name: Install uv
-        uses: astral-sh/setup-uv@v3
+        uses: astral-sh/setup-uv@v10.1.0
 
       # 의존성을 시장별 extra로 나누지 않는다 (S5) — base + dev면 전부 선다.
       # --frozen: uv.lock이 pyproject.toml과 어긋나면 조용히 갱신하지 않고 실패한다.
