@@ -24,7 +24,8 @@ from pathlib import Path
 from typing import Any
 
 import duckdb
-import polars as pl
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from collector.kr.adapters.flows_kis.parsers import (
     INQUIRE_PRICE_PATH,
@@ -254,7 +255,11 @@ def analyze(
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     flat_path = output_dir / "n7_kis_cross_section.parquet"
-    pl.DataFrame(rows, infer_schema_length=None).write_parquet(flat_path)
+    # from_pylist infers the schema from every row (all values are str or
+    # float|None out of flatten_response), matching the previous
+    # infer_schema_length=None. zstd keeps the codec this file already uses
+    # for its other Parquet output below.
+    pq.write_table(pa.Table.from_pylist(rows), flat_path, compression="zstd")
 
     feature_path = (
         root.derived
@@ -436,8 +441,11 @@ def analyze(
         FROM ranked
         ORDER BY rank_gap DESC, market, ticker
     """
-    disagreement_rows = con.execute(disagreement_sql).fetchdf()
-    con.register("disagreement_rows", disagreement_rows)
+    # A TEMP TABLE, not a view: the window functions below run once and the
+    # three queries after the COPY all read the materialized rows. Going
+    # through a pandas frame (fetchdf + register) did the same thing with an
+    # extra copy out of and back into DuckDB.
+    con.execute(f"CREATE TEMP TABLE disagreement_rows AS {disagreement_sql}")
     con.execute(
         "COPY disagreement_rows TO ? (FORMAT PARQUET, COMPRESSION ZSTD)",
         [str(output_dir / "n7_bm_rank_disagreement.parquet")],
