@@ -1,0 +1,46 @@
+name: test
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  # docker.yml이 태그 빌드 앞에 이 워크플로를 그대로 부른다.
+  # 태그 트리거가 `tags: ["*"]`라 이름이 무엇이든 prod 이미지가 만들어지므로,
+  # 검사를 통과한 커밋에서만 이미지가 나가게 한다.
+  workflow_call:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      # 의존성을 시장별 extra로 나누지 않는다 (S5) — base + dev면 전부 선다.
+      # --frozen: uv.lock이 pyproject.toml과 어긋나면 조용히 갱신하지 않고 실패한다.
+      - name: Sync dependencies
+        run: uv sync --extra dev --frozen
+
+      - name: Lint
+        run: uv run --frozen ruff check src tests
+
+      # black은 게이트에 넣지 않는다. 지금 12개 파일이 미포맷이라 넣으면
+      # 그 포맷 커밋이 진행 중인 작업과 섞인다. modeler/ CI도 넣지 않는다.
+
+      - name: Test
+        env:
+          # 비밀이 아니다. 이 값이 없으면 test_cli_entrypoints.py의 세 테스트가
+          # 진짜 로직에 닿기 전에 조기 종료한다 (옛 저장소에도 있던 의존인데
+          # 거기는 .env가 있어 드러나지 않았을 뿐이다).
+          REMOTE_DB_INFO_PATH: /dev/null
+        run: uv run --frozen pytest -q
+
+      # 진입점이 하나라, 미국 서브커맨드를 등록하는 순간부터 이 한 줄이
+      # collector.us.* 를 import한다. 미국 모듈이 import 시점에 환경변수를
+      # 읽으면 여기서 죽는다 — 한국 prod 컨테이너가 죽기 전에.
+      - name: CLI smoke
+        run: uv run --frozen collector --help

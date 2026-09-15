@@ -110,10 +110,11 @@ class PostgresStorage:
 
     def init_schema(self) -> None:
         """Execute ``sql/postgres_ddl.sql`` to create / update tables."""
-        # Find sql file relative to project root
-        # Since this code is in src/collector/kr/infra/db_postgres,
-        # we can go up 5 levels and into 'sql'.
-        sql_path = Path(__file__).parent.parent.parent.parent.parent.parent / "sql" / "postgres_ddl.sql"
+        # Find sql file relative to project root.
+        # This module is src/collector/kr/infra/db_postgres/repositories.py,
+        # so the repo root is six levels up (S1 added the kr/ segment).
+        repo_root = Path(__file__).parent.parent.parent.parent.parent.parent
+        sql_path = repo_root / "sql" / "postgres_ddl.sql"
         if not sql_path.exists():
             logger.error("DDL file not found at %s", sql_path)
             raise FileNotFoundError(f"DDL file not found at {sql_path}")

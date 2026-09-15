@@ -15,7 +15,12 @@ permissions:
   packages: write
 
 jobs:
+  # 태그를 밀면 이름이 무엇이든 prod 이미지가 만들어진다. 검사를 먼저 통과시킨다.
+  test:
+    uses: ./.github/workflows/test.yml
+
   build-and-push:
+    needs: test
     runs-on: ubuntu-latest
 
     steps:
