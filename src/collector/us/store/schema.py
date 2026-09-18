@@ -164,12 +164,47 @@ UNIVERSE_DAILY_ARROW = pyar.schema(
 )
 
 
+# --- volatility_daily (03 §4.6) ---------------------------------------------
+# DoltHub options/volatility_history 를 그대로 받는다. 원천이 decimal(5,4)라
+# 바꾸지 않는다. 연고점·연저점이 같이 와서 IV rank를 따로 계산할 필요가 없다.
+#
+# 커버리지가 유니버스의 절반이 안 된다 — 연 1,600여 종목뿐이고 옵션이 활발한
+# 큰 종목에 쏠려 있다. 결측이 무작위가 아니므로 피쳐로 쓸 때 isna 플래그를
+# 같이 둔다 (03 §4.6).
+
+_VOL = pyar.decimal128(5, 4)
+
+VOLATILITY_DAILY_ARROW = pyar.schema(
+    [
+        ("date", pyar.date32()),
+        ("symbol", pyar.string()),
+        ("hv_current", _VOL),
+        ("hv_week_ago", _VOL),
+        ("hv_month_ago", _VOL),
+        ("hv_year_high", _VOL),
+        ("hv_year_high_date", pyar.date32()),
+        ("hv_year_low", _VOL),
+        ("hv_year_low_date", pyar.date32()),
+        ("iv_current", _VOL),
+        ("iv_week_ago", _VOL),
+        ("iv_month_ago", _VOL),
+        ("iv_year_high", _VOL),
+        ("iv_year_high_date", pyar.date32()),
+        ("iv_year_low", _VOL),
+        ("iv_year_low_date", pyar.date32()),
+        ("observed_at", pyar.timestamp("us", tz="UTC")),
+        ("source_rev", pyar.string()),  # dolt 커밋 해시
+    ]
+)
+
+
 ARROW_SCHEMAS: dict[str, pyar.Schema] = {
     "prices_daily": PRICES_DAILY_ARROW,
     "corp_actions": CORP_ACTIONS_ARROW,
     "fundamentals": FUNDAMENTALS_ARROW,
     "short_interest": SHORT_INTEREST_ARROW,
     "universe_daily": UNIVERSE_DAILY_ARROW,
+    "volatility_daily": VOLATILITY_DAILY_ARROW,
 }
 
 FRAME_SCHEMAS: dict[str, pa.DataFrameSchema] = {

@@ -10,6 +10,7 @@ from collector.us.store.writer import (
     read_snapshot,
     snapshot_path,
     write_snapshot,
+    write_snapshot_arrow,
 )
 
 __all__ = [
@@ -18,4 +19,5 @@ __all__ = [
     "read_snapshot",
     "snapshot_path",
     "write_snapshot",
+    "write_snapshot_arrow",
 ]

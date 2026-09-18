@@ -73,6 +73,46 @@ def write_snapshot(
     return path
 
 
+def write_snapshot_arrow(
+    table_arrow: pyar.Table,
+    table: str,
+    path: Path,
+    *,
+    unique_on: tuple[str, ...] | None = None,
+) -> Path:
+    """벌크 적재용 — pandas를 거치지 않는다.
+
+    :func:`write_snapshot`은 pandera로 값을 보지만 그러려면 pandas를 거쳐야 하고,
+    decimal 컬럼이 object dtype이 되어 수백만 행에서는 무겁다. 원천에서 통째로
+    받아 굳히는 경로는 arrow 그대로 간다.
+
+    **``observed_at`` 강제는 여기서도 같다.** 값 검사 대신 구조 검사를 한다 —
+    출처 컬럼, 스키마 캐스팅(``safe=True``라 정밀도가 깎이면 실패), 그리고
+    ``unique_on``을 주면 파일 안의 유일성까지.
+    """
+    try:
+        schema = ARROW_SCHEMAS[table]
+    except KeyError as exc:
+        raise UnknownTableError(f"{table!r}의 계약이 schema.py에 없다. 먼저 정의한다.") from exc
+
+    missing = [c for c in PROVENANCE_REQUIRED if c not in table_arrow.column_names]
+    if missing:
+        raise MissingProvenanceError(
+            f"{table}: {', '.join(missing)} 없이 쓸 수 없다 (미국 계획 03 §3)."
+        )
+
+    table_arrow = table_arrow.select(schema.names).cast(schema)
+
+    if unique_on:
+        keys = table_arrow.select(list(unique_on))
+        if keys.num_rows != keys.group_by(list(unique_on)).aggregate([]).num_rows:
+            raise ValueError(f"{table}: 파일 안에서 {unique_on} 가 유일하지 않다 (03 §3.1).")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(table_arrow, path, compression="zstd")
+    return path
+
+
 def read_snapshot(path: Path) -> pd.DataFrame:
     """굳힌 스냅샷을 돌려 읽는다. 왕복 대조에 쓴다."""
     return pq.read_table(path).to_pandas()

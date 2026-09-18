@@ -18,6 +18,7 @@ from collector.us.store import (
     read_snapshot,
     snapshot_path,
     write_snapshot,
+    write_snapshot_arrow,
 )
 
 OBSERVED = datetime(2026, 9, 18, 6, 0, tzinfo=UTC)
@@ -141,3 +142,89 @@ def test_importing_us_without_stock_data_root_does_not_die():
     )
     assert proc.returncode == 0, proc.stderr
     assert "ok" in proc.stdout
+
+
+# --- 벌크 경로 (write_snapshot_arrow) ---------------------------------------
+
+
+def _vol_arrow(rows: int = 2, *, dup: bool = False, provenance: bool = True):
+    import pyarrow as pyar
+
+    day = date(2026, 9, 17)
+    syms = ["AAPL"] * rows if dup else [f"S{i}" for i in range(rows)]
+    cols = {
+        "date": pyar.array([day] * rows, type=pyar.date32()),
+        "symbol": pyar.array(syms, type=pyar.string()),
+    }
+    for name in (
+        "hv_current",
+        "hv_week_ago",
+        "hv_month_ago",
+        "hv_year_high",
+        "hv_year_low",
+        "iv_current",
+        "iv_week_ago",
+        "iv_month_ago",
+        "iv_year_high",
+        "iv_year_low",
+    ):
+        cols[name] = pyar.array([Decimal("0.3456")] * rows, type=pyar.decimal128(5, 4))
+    for name in (
+        "hv_year_high_date",
+        "hv_year_low_date",
+        "iv_year_high_date",
+        "iv_year_low_date",
+    ):
+        cols[name] = pyar.array([day] * rows, type=pyar.date32())
+    if provenance:
+        cols["observed_at"] = pyar.array([OBSERVED] * rows, type=pyar.timestamp("us", tz="UTC"))
+    cols["source_rev"] = pyar.array(["abc123"] * rows, type=pyar.string())
+    return pyar.table(cols)
+
+
+def test_arrow_round_trip(tmp_path):
+    p = write_snapshot_arrow(
+        _vol_arrow(3), "volatility_daily", tmp_path / "v.parquet", unique_on=("date", "symbol")
+    )
+    back = read_snapshot(p)
+    assert len(back) == 3
+    assert back["iv_current"].iloc[0] == Decimal("0.3456")
+
+
+def test_arrow_path_also_demands_observed_at(tmp_path):
+    with pytest.raises(MissingProvenanceError, match="observed_at"):
+        write_snapshot_arrow(
+            _vol_arrow(2, provenance=False), "volatility_daily", tmp_path / "v.parquet"
+        )
+
+
+def test_arrow_path_catches_duplicate_keys(tmp_path):
+    with pytest.raises(ValueError, match="유일하지 않다"):
+        write_snapshot_arrow(
+            _vol_arrow(3, dup=True),
+            "volatility_daily",
+            tmp_path / "v.parquet",
+            unique_on=("date", "symbol"),
+        )
+
+
+def test_arrow_path_rejects_unknown_table(tmp_path):
+    with pytest.raises(UnknownTableError):
+        write_snapshot_arrow(_vol_arrow(1), "no_such_table", tmp_path / "v.parquet")
+
+
+# --- dolt 원천 --------------------------------------------------------------
+
+
+def test_dolt_repo_dir_layout(tmp_path):
+    from collector.us.sources import dolt
+
+    assert dolt.repo_dir(DataRoot(tmp_path), "options") == tmp_path / "raw" / "dolt" / "options"
+
+
+def test_dolt_refuses_a_directory_that_is_not_a_repo(tmp_path):
+    """중단된 clone은 .dolt 가 있어도 dolt가 in-progress로 본다 — 먼저 걸러낸다."""
+    from collector.us.sources import dolt
+
+    with pytest.raises(dolt.DoltError, match="dolt 레포가 아니다"):
+        dolt.head_commit(tmp_path)
