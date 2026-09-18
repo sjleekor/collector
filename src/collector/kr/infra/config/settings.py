@@ -156,6 +156,10 @@ class Settings(BaseSettings):
         ecos_timeout_seconds: HTTP timeout for ECOS requests.
         fred_api_key: Optional FRED API key.
         fred_timeout_seconds: HTTP timeout for FRED requests.
+        sec_user_agent: Contact-bearing User-Agent for SEC (US). Declared here
+            because ``BaseSettings`` defaults ``extra`` to ``forbid`` and the
+            dotenv source passes every key in ``.env`` through — an undeclared
+            key there makes ``get_settings()`` raise for the whole CLI.
     """
 
     model_config = SettingsConfigDict(
@@ -238,6 +242,10 @@ class Settings(BaseSettings):
     # FRED
     fred_api_key: str = ""
     fred_timeout_seconds: float = 20.0
+
+    # 미국 — www.sec.gov는 연락처 없는 UA에 403을 준다. 값은 .env에만 둔다
+    # (이 저장소는 public이다). 형식: "<name>/<ver> (<contact email>)".
+    sec_user_agent: str = ""
 
     # Rate limiting
     rate_limit_seconds: float = 0.2
