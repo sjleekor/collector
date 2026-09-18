@@ -11,7 +11,7 @@ import pandas as pd
 import pandera.errors
 import pytest
 
-from collector.us import paths
+from collector.lake import DataRoot
 from collector.us.store import (
     MissingProvenanceError,
     UnknownTableError,
@@ -40,47 +40,16 @@ def _prices(**overrides) -> pd.DataFrame:
 
 
 # --- 경로 ------------------------------------------------------------------
-
-
-def test_lake_root_is_market_under_stock_data_root():
-    root = paths.resolve_lake_root(env={"STOCK_DATA_ROOT": "/lake"})
-    assert root.as_posix() == "/lake/us"
-
-
-def test_lake_root_without_env_raises():
-    with pytest.raises(RuntimeError, match="STOCK_DATA_ROOT"):
-        paths.resolve_lake_root(env={})
-
-
-def test_lake_root_override_is_taken_as_is(tmp_path):
-    """변형 lake 진입로 — 한국이 kr/derived/_e5를 잃었던 자리다 (02 §1.2.1)."""
-    assert paths.resolve_lake_root(tmp_path, env={}) == tmp_path
-
-
-def test_layer_helpers(tmp_path):
-    assert paths.raw_dir(tmp_path).name == "raw"
-    assert paths.derived_dir(tmp_path).name == "derived"
-    assert paths.datasets_dir(tmp_path).name == "datasets"
-    assert paths.output_dir(tmp_path).name == "output"
-    assert paths.snapshots_dir(tmp_path, "prices_daily").parts[-3:] == (
-        "derived",
-        "snapshots",
-        "prices_daily",
-    )
-
-
-def test_missing_layers_reports_shape(tmp_path):
-    assert set(paths.missing_layers(tmp_path)) == set(paths.LAYERS)
-    for layer in paths.LAYERS:
-        (tmp_path / layer).mkdir()
-    assert paths.missing_layers(tmp_path) == ()
+# DataRoot 자체 테스트는 test_lake.py에 있다. 여기서는 US store가 그것을
+# 어떻게 쓰는지만 본다.
 
 
 def test_snapshot_path_key_does_not_collide_with_a_column(tmp_path):
     """경로 키가 `date`면 그 값이 같은 이름의 컬럼을 덮어쓴다 (한국 source 사고)."""
-    p = snapshot_path(tmp_path, "prices_daily", date(2026, 9, 9))
+    p = snapshot_path(DataRoot(tmp_path), "prices_daily", date(2026, 9, 9))
     assert "snapshot_date=2026-09-09" in p.as_posix()
     assert "/date=" not in p.as_posix()
+    assert p.parts[-4:-2] == ("snapshots", "prices_daily")
 
 
 # --- 왕복 ------------------------------------------------------------------
@@ -88,7 +57,7 @@ def test_snapshot_path_key_does_not_collide_with_a_column(tmp_path):
 
 def test_round_trip(tmp_path):
     p = write_snapshot(
-        _prices(), "prices_daily", snapshot_path(tmp_path, "prices_daily", "2026-09-09")
+        _prices(), "prices_daily", snapshot_path(DataRoot(tmp_path), "prices_daily", "2026-09-09")
     )
     back = read_snapshot(p)
     assert len(back) == 2
@@ -100,7 +69,9 @@ def test_round_trip(tmp_path):
 def test_empty_snapshot_round_trips(tmp_path):
     """C2 완료 판정 — 빈 스냅샷 하나를 쓰고 읽는 왕복이 된다."""
     empty = _prices().iloc[0:0]
-    p = write_snapshot(empty, "prices_daily", snapshot_path(tmp_path, "prices_daily", "2026-09-09"))
+    p = write_snapshot(
+        empty, "prices_daily", snapshot_path(DataRoot(tmp_path), "prices_daily", "2026-09-09")
+    )
     assert read_snapshot(p).empty
 
 
@@ -161,7 +132,7 @@ def test_unknown_table_is_rejected(tmp_path):
 
 def test_importing_us_without_stock_data_root_does_not_die():
     """진입점이 하나라, 여기서 죽으면 한국 prod 컨테이너가 같이 죽는다."""
-    code = "import collector.us, collector.us.paths, collector.us.store; print('ok')"
+    code = "import collector.us, collector.us.store; print('ok')"
     proc = subprocess.run(
         [sys.executable, "-c", code],
         capture_output=True,

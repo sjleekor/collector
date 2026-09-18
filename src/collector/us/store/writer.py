@@ -18,7 +18,7 @@ import pandas as pd
 import pyarrow as pyar
 import pyarrow.parquet as pq
 
-from collector.us.paths import snapshots_dir
+from collector.lake import DataRoot
 from collector.us.store.schema import (
     ARROW_SCHEMAS,
     FRAME_SCHEMAS,
@@ -34,10 +34,10 @@ class UnknownTableError(KeyError):
     """schema.py에 계약이 없는 테이블이다."""
 
 
-def snapshot_path(root: Path, table: str, snapshot_date: _date | str) -> Path:
-    """``derived/snapshots/<table>/snapshot_date=<d>/part.parquet``."""
+def snapshot_path(root: DataRoot, table: str, snapshot_date: _date | str) -> Path:
+    """``<root>/derived/snapshots/<table>/snapshot_date=<d>/part.parquet``."""
     day = snapshot_date.isoformat() if isinstance(snapshot_date, _date) else str(snapshot_date)
-    return snapshots_dir(root, table) / f"snapshot_date={day}" / "part.parquet"
+    return root.derived / "snapshots" / table / f"snapshot_date={day}" / "part.parquet"
 
 
 def write_snapshot(

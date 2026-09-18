@@ -16,8 +16,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
-from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -36,39 +34,10 @@ from collector.kr.adapters.kis_common.token import KisTokenCache, KisTokenProvid
 from collector.kr.infra.config.settings import get_settings
 from collector.kr.util.rate_limit import TokenBucket
 from collector.kr.util.time import now_kst, today_kst
+from collector.lake import DataRoot
 
 LOGGER = logging.getLogger(__name__)
 REMOTE_SOURCE = "sj2_remote"
-
-
-@dataclass(frozen=True)
-class _DataRoot:
-    """stock_data/<market>/ — just the ``raw``/``derived`` branches N7 reads.
-
-    A local, minimal stand-in: this file is the one script that crosses from
-    ``collector/`` into the shared lake, so it does not depend on
-    ``modeler/``'s ``research.etl.config.DataRoot`` (a separate repo since
-    the S4/S5 split).
-    """
-
-    base: Path
-
-    @classmethod
-    def resolve(cls, market: str = "kr") -> _DataRoot:
-        root = os.environ.get("STOCK_DATA_ROOT")
-        if not root:
-            raise RuntimeError(
-                "STOCK_DATA_ROOT가 없습니다. .envrc를 확인하십시오 (direnv allow)."
-            )
-        return cls(Path(root) / market)
-
-    @property
-    def raw(self) -> Path:
-        return self.base / "raw"
-
-    @property
-    def derived(self) -> Path:
-        return self.base / "derived"
 
 
 def parse_decimal(value: object) -> float | None:
@@ -82,7 +51,7 @@ def parse_decimal(value: object) -> float | None:
         return None
 
 
-def load_targets(*, root: _DataRoot, snapshot_date: str, source: str) -> list[dict[str, str]]:
+def load_targets(*, root: DataRoot, snapshot_date: str, source: str) -> list[dict[str, str]]:
     path = (
         root.raw
         / "raw_postgres"
@@ -246,7 +215,7 @@ def _one_row(con: duckdb.DuckDBPyConnection, sql: str) -> dict[str, Any]:
 def analyze(
     *,
     rows: list[dict[str, Any]],
-    root: _DataRoot,
+    root: DataRoot,
     snapshot_date: str,
     source: str,
     as_of_date: date,
@@ -622,7 +591,7 @@ def main(argv: list[str] | None = None) -> int:
 
     settings = get_settings()
     rate = args.requests_per_second or settings.kis_requests_per_second
-    root = _DataRoot(args.data_lake_root) if args.data_lake_root else _DataRoot.resolve(market="kr")
+    root = DataRoot(args.data_lake_root) if args.data_lake_root else DataRoot.resolve(market="kr")
     output_root = args.output_root or (root.output / "scan" / "n7_kis_cross_section")
     output_dir = (
         output_root
