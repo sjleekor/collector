@@ -131,6 +131,18 @@ def monthly_candidates_sql(*, base: str = "daily_base", listing: str = "listing_
                median(adv_20d)        AS adv_20d,
                median(traded_days_20) AS traded_days_20
         FROM {base} GROUP BY 1, 2
+    ),
+    -- 플래그는 그 달 **아무 날에라도** 켜졌으면 켜진 것으로 본다.
+    -- 월 첫 거래일 하루에 기대면, 그날 가격이 없는 종목(테스트 심볼처럼
+    -- 띄엄띄엄 거래되는 것)이 NULL -> FALSE 로 새어 들어온다.
+    month_flags AS (
+        SELECT date_trunc('month', date) AS ym,
+               symbol,
+               bool_or(is_etf)      AS is_etf,
+               bool_or(test_issue)  AS test_issue,
+               max(security_name)   AS security_name,
+               min(listing_age_days) AS listing_age_days
+        FROM {listing} GROUP BY 1, 2
     )
     SELECT
         m.ym,
@@ -146,8 +158,8 @@ def monthly_candidates_sql(*, base: str = "daily_base", listing: str = "listing_
         COALESCE(l.test_issue, FALSE)  AS test_assumed,
         {_name_exclusion_sql("COALESCE(l.security_name, '')")} AS name_excluded
     FROM month_first m
-    JOIN month_stat b     ON b.ym = m.ym
-    LEFT JOIN {listing} l ON l.date = m.judge_date AND l.symbol = b.symbol
+    JOIN month_stat b   ON b.ym = m.ym
+    LEFT JOIN month_flags l ON l.ym = m.ym AND l.symbol = b.symbol
     """
 
 
@@ -184,6 +196,48 @@ def build_universe_daily(
     pairs = sorted({(str(v["ticker"]).upper(), int(v["cik_str"])) for v in entries.values()})
     con.execute("CREATE TABLE company_tickers (symbol VARCHAR, cik BIGINT)")
     con.executemany("INSERT INTO company_tickers VALUES (?, ?)", pairs)
+
+    # dolt symbol 의 현재값. Wayback 이 그 날짜를 못 덮을 때만 쓴다 — PIT 는
+    # 아니지만 "모르면 FALSE" 보다 낫다. ZWZZT(나스닥 테스트 심볼)와
+    # SGOV(ETF)가 그 틈으로 들어왔었다 (2026-09-19).
+    dolt_symbol = root.raw / "dolt" / "stocks"
+    con.execute(
+        "CREATE TABLE symbol_current (symbol VARCHAR, is_etf BOOLEAN, "
+        "test_issue BOOLEAN, security_name VARCHAR)"
+    )
+    if (dolt_symbol / ".dolt").is_dir():
+        import subprocess
+
+        proc = subprocess.run(
+            [
+                "dolt",
+                "sql",
+                "-q",
+                "select act_symbol, is_etf, is_test_issue, security_name from symbol",
+                "-r",
+                "csv",
+            ],
+            cwd=dolt_symbol,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        import csv as _csv
+        import io as _io
+
+        reader = _csv.DictReader(_io.StringIO(proc.stdout))
+        con.executemany(
+            "INSERT INTO symbol_current VALUES (?, ?, ?, ?)",
+            [
+                (
+                    r["act_symbol"],
+                    (r["is_etf"] or "0") not in ("0", ""),
+                    (r["is_test_issue"] or "0") not in ("0", ""),
+                    r["security_name"],
+                )
+                for r in reader
+            ],
+        )
 
     warmup_start = (_dt.date.fromisoformat(start) - _dt.timedelta(days=WARMUP_DAYS)).isoformat()
     # 원천에 비정규장 데이터가 섞여 있다 — 2020-02-17(Presidents' Day)에 3,432행이
@@ -222,11 +276,18 @@ def build_universe_daily(
         CREATE TABLE listing_daily AS
         SELECT b.date, b.symbol, l.as_of AS listing_as_of,
                date_diff('day', l.as_of, b.date) AS listing_age_days,
-               l.kind, l.security_name, l.exchange, l.market_category,
-               l.is_etf, l.test_issue, l.financial_status
+               l.kind,
+               COALESCE(l.security_name, sc.security_name) AS security_name,
+               l.exchange, l.market_category,
+               -- Wayback PIT 값이 있으면 그것, 없으면 dolt 현재값.
+               COALESCE(l.is_etf, sc.is_etf)           AS is_etf,
+               COALESCE(l.test_issue, sc.test_issue)   AS test_issue,
+               (l.is_etf IS NULL AND sc.is_etf IS NOT NULL) AS flags_from_current,
+               l.financial_status
         FROM daily_base b
         ASOF LEFT JOIN listing_flat l
           ON b.symbol = l.symbol AND b.date >= l.as_of
+        LEFT JOIN symbol_current sc ON sc.symbol = b.symbol
         """)
 
     con.execute("CREATE TABLE monthly AS " + monthly_candidates_sql())
