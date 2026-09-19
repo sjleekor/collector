@@ -113,6 +113,60 @@ def write_snapshot_arrow(
     return path
 
 
+def verify_snapshot(
+    path: Path,
+    table: str,
+    *,
+    unique_on: tuple[str, ...] | None = None,
+) -> dict[str, object]:
+    """이미 쓴 파일이 계약에 맞는지 본다 — 흘려 쓴 경로용.
+
+    수천만 행은 메모리에 올리지 않고 DuckDB가 곧장 parquet으로 흘리는 편이
+    낫다. 그러면 :func:`write_snapshot_arrow`를 못 거치므로 **쓴 뒤에** 같은
+    것을 확인한다: 컬럼·타입이 계약과 같은가, 출처 컬럼에 결측이 없는가,
+    파일 안에서 키가 유일한가.
+    """
+    import duckdb
+
+    try:
+        schema = ARROW_SCHEMAS[table]
+    except KeyError as exc:
+        raise UnknownTableError(f"{table!r}의 계약이 schema.py에 없다.") from exc
+
+    got = pq.ParquetFile(path).schema_arrow
+    if got.names != schema.names:
+        raise ValueError(
+            f"{table}: 컬럼이 계약과 다르다.\n  계약: {schema.names}\n  파일: {got.names}"
+        )
+    mismatched = [
+        f"{f.name}: 계약 {f.type} / 파일 {got.field(f.name).type}"
+        for f in schema
+        if not f.type.equals(got.field(f.name).type)
+    ]
+    if mismatched:
+        raise ValueError(f"{table}: 타입이 계약과 다르다 — " + "; ".join(mismatched))
+
+    con = duckdb.connect()
+    src = f"read_parquet('{path}')"
+    nulls = con.execute(
+        f"SELECT count(*) FROM {src} WHERE "
+        + " OR ".join(f"{c} IS NULL" for c in PROVENANCE_REQUIRED)
+    ).fetchone()[0]
+    if nulls:
+        raise MissingProvenanceError(f"{table}: 출처 컬럼이 비어 있는 행 {nulls:,}개")
+
+    rows = con.execute(f"SELECT count(*) FROM {src}").fetchone()[0]
+    if unique_on:
+        keys = ", ".join(unique_on)
+        distinct = con.execute(f"SELECT count(DISTINCT ({keys})) FROM {src}").fetchone()[0]
+        if distinct != rows:
+            raise ValueError(
+                f"{table}: 파일 안에서 ({keys}) 가 유일하지 않다 — "
+                f"{rows:,}행 중 {distinct:,}개 (03 §3.1)"
+            )
+    return {"rows": rows, "bytes": path.stat().st_size}
+
+
 def read_snapshot(path: Path) -> pd.DataFrame:
     """굳힌 스냅샷을 돌려 읽는다. 왕복 대조에 쓴다."""
     return pq.read_table(path).to_pandas()

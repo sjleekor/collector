@@ -90,9 +90,11 @@ CORP_ACTIONS_ARROW = pyar.schema(
         ("symbol", pyar.string()),
         ("ex_date", pyar.date32()),
         ("kind", pyar.string()),  # split | dividend
-        ("to_factor", pyar.int64()),
-        ("for_factor", pyar.int64()),
-        ("amount", _PRICE),
+        # 원천이 decimal(10,5)다. 정수가 아니다 — FBP 2011-01-07 이 1:15 이고
+        # 주식배당은 101:100 · 11:10 처럼 온다 (03 §2.1).
+        ("to_factor", pyar.decimal128(10, 5)),
+        ("for_factor", pyar.decimal128(10, 5)),
+        ("amount", pyar.decimal128(10, 5)),
         ("declaration_date", pyar.date32()),  # Nasdaq에서만 온다. 없으면 null
         ("record_date", pyar.date32()),
         ("payment_date", pyar.date32()),

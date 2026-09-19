@@ -9,6 +9,7 @@ from collector.us.store.writer import (
     UnknownTableError,
     read_snapshot,
     snapshot_path,
+    verify_snapshot,
     write_snapshot,
     write_snapshot_arrow,
 )
@@ -18,6 +19,7 @@ __all__ = [
     "UnknownTableError",
     "read_snapshot",
     "snapshot_path",
+    "verify_snapshot",
     "write_snapshot",
     "write_snapshot_arrow",
 ]

@@ -23,7 +23,7 @@ import pyarrow as pyar
 import pyarrow.parquet as pq
 
 from collector.lake import DataRoot
-from collector.us.store.writer import snapshot_path, write_snapshot_arrow
+from collector.us.store.writer import snapshot_path, verify_snapshot, write_snapshot_arrow
 
 #: 쓰는 레포. clone 위치는 ``<root>/raw/dolt/<repo>``다.
 REPOS: tuple[str, ...] = ("stocks", "options", "earnings")
@@ -95,3 +95,153 @@ def load_volatility_daily(
     staged.unlink(missing_ok=True)
 
     return {"path": dest, "rows": n, "source_rev": rev, "observed_at": observed_at}
+
+
+def pull(root: DataRoot, repo: str) -> dict[str, object]:
+    """``dolt pull``. 커밋 해시가 바뀌었는지 돌려준다.
+
+    **해시가 같으면 새로 굳힐 것이 없다** (05 §5 — 가격은 바뀐 것만 남긴다).
+    """
+    path = repo_dir(root, repo)
+    before = head_commit(path)
+    _run(path, "pull")
+    after = head_commit(path)
+    return {"repo": repo, "before": before, "after": after, "changed": before != after}
+
+
+def load_prices_daily(
+    root: DataRoot,
+    *,
+    snapshot_date: _date | str,
+    observed_at: datetime | None = None,
+    work_dir: Path | None = None,
+) -> dict[str, object]:
+    """``stocks/ohlcv`` 한 벌을 ``prices_daily`` 스냅샷으로 굳힌다 (03 §4.1).
+
+    2,900만 행이라 메모리에 올리지 않는다 — DuckDB가 곧장 parquet으로 흘리고,
+    계약 확인은 쓴 뒤에 :func:`verify_snapshot`이 한다.
+
+    **조정하지 않는다.** 원시값과 이벤트만 저장하고 조정은 읽을 때 계산한다
+    (:mod:`collector.us.adjust`).
+    """
+    import duckdb
+
+    observed_at = observed_at or datetime.now(UTC)
+    repo = repo_dir(root, "stocks")
+    rev = head_commit(repo)
+    work_dir = work_dir or (root.output / "_tmp")
+    staged = export_table(repo, "ohlcv", work_dir / "ohlcv.parquet")
+
+    dest = snapshot_path(root, "prices_daily", snapshot_date)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    con = duckdb.connect()
+    con.execute(
+        f"""
+        COPY (
+            SELECT CAST(date AS DATE) AS date,
+                   act_symbol AS symbol,
+                   open, high, low, close,
+                   CAST(volume AS BIGINT) AS volume,
+                   CAST(? AS TIMESTAMP WITH TIME ZONE) AS observed_at,
+                   CAST(? AS VARCHAR) AS source_rev
+            FROM read_parquet('{staged}')
+        ) TO '{dest}' (FORMAT PARQUET, COMPRESSION ZSTD)
+        """,
+        [observed_at, rev],
+    )
+    staged.unlink(missing_ok=True)
+    stats = verify_snapshot(dest, "prices_daily", unique_on=("date", "symbol"))
+    return {"path": dest, "source_rev": rev, "observed_at": observed_at, **stats}
+
+
+def load_corp_actions(
+    root: DataRoot,
+    *,
+    snapshot_date: _date | str,
+    observed_at: datetime | None = None,
+    work_dir: Path | None = None,
+) -> dict[str, object]:
+    """분할 세 곳 + 배당을 ``corp_actions`` 한 장으로 합친다 (03 §2.1, §4.2).
+
+    **DoltHub `split`만 쓰면 안 된다.** `GOOGL` 2014-04-03 2:1이 거기 없다.
+    겹치면 DoltHub를 우선하고 보충분에만 있는 것을 더한다.
+    """
+    import duckdb
+
+    observed_at = observed_at or datetime.now(UTC)
+    repo = repo_dir(root, "stocks")
+    rev = head_commit(repo)
+    work_dir = work_dir or (root.output / "_tmp")
+    splits = export_table(repo, "split", work_dir / "split.parquet")
+    dividends = export_table(repo, "dividend", work_dir / "dividend.parquet")
+
+    backfill = root.derived / "splits" / "us_splits_2011_2014.csv"
+    missing = root.derived / "splits" / "us_splits_dolt_missing_2014.csv"
+    for extra in (backfill, missing):
+        if not extra.is_file():
+            raise FileNotFoundError(f"보충 분할표가 없다: {extra} (03 §2.1)")
+
+    dest = snapshot_path(root, "corp_actions", snapshot_date)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    con = duckdb.connect()
+    con.execute(
+        f"""
+        COPY (
+            -- dolt table export 가 DATE 를 timestamp 로 쓴다. 되돌린다.
+            WITH dolt_split AS (
+                SELECT act_symbol AS symbol, CAST(ex_date AS DATE) AS ex_date,
+                       to_factor, for_factor,
+                       'dolt' AS source, 'dolt' AS tier
+                FROM read_parquet('{splits}')
+            ),
+            extra AS (
+                SELECT act_symbol AS symbol, CAST(ex_date AS DATE) AS ex_date,
+                       CAST(to_factor AS DECIMAL(10,5)) AS to_factor,
+                       CAST(for_factor AS DECIMAL(10,5)) AS for_factor,
+                       source, tier
+                FROM read_csv_auto('{backfill}')
+                UNION ALL
+                SELECT act_symbol, CAST(ex_date AS DATE),
+                       CAST(to_factor AS DECIMAL(10,5)),
+                       CAST(for_factor AS DECIMAL(10,5)), source, tier
+                FROM read_csv_auto('{missing}')
+            ),
+            -- 겹치면 DoltHub가 이긴다: 보충분에서 (symbol, ex_date)가 같은 것을 뺀다
+            extra_only AS (
+                SELECT e.* FROM extra e
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM dolt_split d
+                    WHERE d.symbol = e.symbol AND d.ex_date = e.ex_date
+                )
+            ),
+            all_splits AS (
+                SELECT * FROM dolt_split UNION ALL SELECT * FROM extra_only
+            )
+            SELECT symbol,
+                   ex_date,
+                   'split' AS kind,
+                   to_factor, for_factor,
+                   CAST(NULL AS DECIMAL(10,5)) AS amount,
+                   CAST(NULL AS DATE) AS declaration_date,
+                   CAST(NULL AS DATE) AS record_date,
+                   CAST(NULL AS DATE) AS payment_date,
+                   source, tier,
+                   CAST(? AS TIMESTAMP WITH TIME ZONE) AS observed_at,
+                   CAST(? AS VARCHAR) AS source_rev
+            FROM all_splits
+            UNION ALL
+            SELECT act_symbol, CAST(ex_date AS DATE), 'dividend',
+                   CAST(NULL AS DECIMAL(10,5)), CAST(NULL AS DECIMAL(10,5)),
+                   amount,
+                   CAST(NULL AS DATE), CAST(NULL AS DATE), CAST(NULL AS DATE),
+                   'dolt', 'dolt',
+                   CAST(? AS TIMESTAMP WITH TIME ZONE), CAST(? AS VARCHAR)
+            FROM read_parquet('{dividends}')
+        ) TO '{dest}' (FORMAT PARQUET, COMPRESSION ZSTD)
+        """,
+        [observed_at, rev, observed_at, rev],
+    )
+    for f in (splits, dividends):
+        f.unlink(missing_ok=True)
+    stats = verify_snapshot(dest, "corp_actions", unique_on=("symbol", "ex_date", "kind"))
+    return {"path": dest, "source_rev": rev, "observed_at": observed_at, **stats}
