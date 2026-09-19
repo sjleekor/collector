@@ -69,8 +69,22 @@ def financial_statements_url(year: int, quarter: int) -> str:
     return f"{BASE}/files/dera/data/financial-statement-data-sets/{year}q{quarter}.zip"
 
 
+#: 목록 페이지가 규칙과 다른 경로로 거는 분기. **디렉터리가 바뀌는 중이다** —
+#: 82개 링크 중 최신 분기 하나만 ``datastandardsinnovation``을 가리키고 나머지는
+#: 전부 ``structureddata``다 (2026-09-19 실측). 규칙대로 만든 URL은 404다.
+#: 새 분기가 또 404면 목록 페이지의 ``href``를 먼저 본다 — MIDAS와 같은 일이다.
+INSIDER_URL_EXCEPTIONS: dict[tuple[int, int], str] = {
+    (2026, 2): (
+        f"{BASE}/files/datastandardsinnovation/data/insider-transactions-data-sets/"
+        "2026q2_form345.zip"
+    ),
+}
+
+
 def insider_url(year: int, quarter: int) -> str:
-    """내부자 거래 Form 3·4·5."""
+    """내부자 거래 Form 3·4·5. **규칙으로 만들되 예외표를 먼저 본다.**"""
+    if (year, quarter) in INSIDER_URL_EXCEPTIONS:
+        return INSIDER_URL_EXCEPTIONS[(year, quarter)]
     return (
         f"{BASE}/files/structureddata/data/insider-transactions-data-sets/"
         f"{year}q{quarter}_form345.zip"
@@ -409,3 +423,178 @@ def extract_midas(
         "deduped_rows": before - int(stats["rows"]),
         **stats,
     }
+
+
+#: 내부자 ZIP에서 쓰는 TSV. 나머지 여섯(FOOTNOTES·*_HOLDING·OWNER_SIGNATURE·
+#: 메타·readme)은 원문에만 두고 뽑지 않는다.
+INSIDER_MEMBERS = ("SUBMISSION.tsv", "NONDERIV_TRANS.tsv", "DERIV_TRANS.tsv", "REPORTINGOWNER.tsv")
+
+#: 날짜가 ``31-OCT-2018`` 꼴이다. 분기 재무 데이터셋(``20181031``)과 다르다.
+_INSIDER_DATE = "%d-%b-%Y"
+
+_TSV = "delim='\t', header=true, quote='', escape='', all_varchar=true"
+
+
+def _insider_trans_select(tmp: Path, *, deriv: bool) -> str:
+    """거래 TSV 한 장을 공통 컬럼으로 맞춘다. 파생 전용 셋은 비파생에서 null이다."""
+    sk = "DERIV_TRANS_SK" if deriv else "NONDERIV_TRANS_SK"
+    if deriv:
+        extra = f"""
+                   TRY_CAST("CONV_EXERCISE_PRICE" AS DOUBLE)      AS conv_exercise_price,
+                   TRY_CAST("UNDLYNG_SEC_SHARES"  AS DOUBLE)      AS underlying_shares,
+                   try_strptime("EXPIRATION_DATE", '{_INSIDER_DATE}')::DATE AS expiration_date,"""
+    else:
+        extra = """
+                   CAST(NULL AS DOUBLE)                           AS conv_exercise_price,
+                   CAST(NULL AS DOUBLE)                           AS underlying_shares,
+                   CAST(NULL AS DATE)                             AS expiration_date,"""
+    return f"""
+            SELECT "ACCESSION_NUMBER"                             AS accession,
+                   {str(deriv).upper()}                           AS is_derivative,
+                   TRY_CAST("{sk}" AS BIGINT)                     AS trans_sk,
+                   "SECURITY_TITLE"                               AS security_title,
+                   try_strptime("TRANS_DATE", '{_INSIDER_DATE}')::DATE AS trans_date,
+                   "TRANS_CODE"                                   AS trans_code,
+                   "TRANS_FORM_TYPE"                              AS trans_form_type,
+                   TRY_CAST("EQUITY_SWAP_INVOLVED" AS INTEGER) <> 0 AS equity_swap_involved,
+                   TRY_CAST("TRANS_SHARES"         AS DOUBLE)     AS trans_shares,
+                   TRY_CAST("TRANS_PRICEPERSHARE"  AS DOUBLE)     AS trans_pricepershare,
+                   "TRANS_ACQUIRED_DISP_CD"                       AS acquired_disposed,
+                   TRY_CAST("SHRS_OWND_FOLWNG_TRANS" AS DOUBLE)   AS shares_owned_following,
+                   "DIRECT_INDIRECT_OWNERSHIP"                    AS direct_indirect,{extra}
+            FROM read_csv('{tmp}', {_TSV})
+    """
+
+
+def extract_insider(
+    root: DataRoot,
+    *,
+    snapshot_date,
+    observed_at=None,
+    work_dir: Path | None = None,
+) -> dict[str, object]:
+    """분기 내부자 ZIP들을 ``insider_trans``·``insider_owners`` 두 장으로 (03 §4.10).
+
+    **`filing_date`가 PIT의 축이다.** 거래일이 아니라 공시일 기준으로 붙인다 —
+    Form 4는 거래 2영업일 안이지만 Form 5는 회계연도 뒤 45일까지 늦다.
+    """
+    import datetime as _dt
+
+    import duckdb
+
+    from collector.us.store.writer import snapshot_path, verify_snapshot
+
+    observed_at = observed_at or _dt.datetime.now(_dt.UTC)
+    work_dir = work_dir or (root.output / "_tmp" / "insider")
+    work_dir.mkdir(parents=True, exist_ok=True)
+    # 앞 실행이 중간에 끊겼으면 조각이 남아 있다. 글롭으로 읽으므로 먼저 치운다
+    for stale in work_dir.glob("*.parquet"):
+        stale.unlink()
+    con = duckdb.connect()
+    trans_parts, owner_parts, missing = [], [], []
+    unmatched = 0
+
+    for y, q in quarters((2018, 3), (2026, 2)):
+        zp = quarterly_path(root, "insider", y, q)
+        if not zp.is_file():
+            missing.append(f"{y}q{q}")
+            continue
+        tag = f"{y}q{q}"
+        tmp = {
+            m: _member_to_temp(zp, m, work_dir / f"{tag}_{m}") for m in INSIDER_MEMBERS
+        }
+
+        trans_part = work_dir / f"{tag}_trans.parquet"
+        con.execute(
+            f"""
+            COPY (
+                SELECT t.accession,
+                       t.is_derivative,
+                       t.trans_sk,
+                       TRY_CAST(s."ISSUERCIK" AS BIGINT)                  AS issuer_cik,
+                       s."ISSUERTRADINGSYMBOL"                            AS issuer_symbol,
+                       s."DOCUMENT_TYPE"                                  AS doc_type,
+                       try_strptime(s."FILING_DATE", '{_INSIDER_DATE}')::DATE AS filing_date,
+                       try_strptime(s."PERIOD_OF_REPORT", '{_INSIDER_DATE}')::DATE
+                           AS period_of_report,
+                       t.security_title, t.trans_date, t.trans_code, t.trans_form_type,
+                       t.equity_swap_involved, t.trans_shares, t.trans_pricepershare,
+                       t.acquired_disposed, t.shares_owned_following, t.direct_indirect,
+                       t.conv_exercise_price, t.underlying_shares, t.expiration_date,
+                       CAST(? AS TIMESTAMP WITH TIME ZONE)                AS observed_at,
+                       CAST(? AS VARCHAR)                                 AS source_rev
+                FROM (
+                    {_insider_trans_select(tmp['NONDERIV_TRANS.tsv'], deriv=False)}
+                    UNION ALL BY NAME
+                    {_insider_trans_select(tmp['DERIV_TRANS.tsv'], deriv=True)}
+                ) t
+                -- LEFT다. 공시 메타가 없는 거래를 조용히 버리지 않는다 — 몇 건인지 센다
+                LEFT JOIN read_csv('{tmp["SUBMISSION.tsv"]}', {_TSV}) s
+                       ON s."ACCESSION_NUMBER" = t.accession
+            ) TO '{trans_part}' (FORMAT PARQUET)
+            """,
+            [observed_at, tag],
+        )
+        unmatched += con.execute(
+            f"SELECT count(*) FROM read_parquet('{trans_part}') WHERE issuer_cik IS NULL"
+        ).fetchone()[0]
+
+        owner_part = work_dir / f"{tag}_owners.parquet"
+        rel = 'upper("RPTOWNER_RELATIONSHIP")'
+        con.execute(
+            f"""
+            COPY (
+                SELECT "ACCESSION_NUMBER"                  AS accession,
+                       TRY_CAST("RPTOWNERCIK" AS BIGINT)   AS owner_cik,
+                       "RPTOWNERNAME"                      AS owner_name,
+                       "RPTOWNER_RELATIONSHIP"             AS relationship,
+                       -- 쉼표로 끊긴 것과 붙어 온 것이 섞여 있다("DirectorOther").
+                       -- 부분 문자열로 본다 — 넷 중 어느 것도 서로의 부분이 아니다.
+                       {rel} LIKE '%DIRECTOR%'             AS is_director,
+                       {rel} LIKE '%OFFICER%'              AS is_officer,
+                       {rel} LIKE '%TENPERCENTOWNER%'      AS is_ten_percent_owner,
+                       {rel} LIKE '%OTHER%'                AS is_other,
+                       "RPTOWNER_TITLE"                    AS officer_title,
+                       CAST(? AS TIMESTAMP WITH TIME ZONE) AS observed_at,
+                       CAST(? AS VARCHAR)                  AS source_rev
+                FROM read_csv('{tmp["REPORTINGOWNER.tsv"]}', {_TSV})
+            ) TO '{owner_part}' (FORMAT PARQUET)
+            """,
+            [observed_at, tag],
+        )
+
+        for path in tmp.values():
+            path.unlink()
+        trans_parts.append(trans_part)
+        owner_parts.append(owner_part)
+
+    if not trans_parts:
+        raise SecAccessError("내부자 ZIP이 하나도 없다. 먼저 받는다.")
+
+    out: dict[str, object] = {
+        "quarters": len(trans_parts),
+        "missing": missing,
+        "trans_without_submission": unmatched,
+    }
+    for table, parts, unique_on, dedup in (
+        ("insider_trans", trans_parts, ("accession", "is_derivative", "trans_sk"), False),
+        # 같은 공시에 같은 신고인이 두 번 오는 일이 있다(원천 중복). 하나만 남긴다
+        ("insider_owners", owner_parts, ("accession", "owner_cik"), True),
+    ):
+        dest = snapshot_path(root, table, snapshot_date)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        src = "read_parquet([" + ", ".join(f"'{p}'" for p in parts) + "])"
+        body = f"SELECT * FROM {src}"
+        if dedup:
+            body += (
+                " QUALIFY row_number() OVER"
+                " (PARTITION BY accession, owner_cik ORDER BY source_rev) = 1"
+            )
+        before = con.execute(f"SELECT count(*) FROM {src}").fetchone()[0]
+        con.execute(f"COPY ({body}) TO '{dest}' (FORMAT PARQUET, COMPRESSION ZSTD)")
+        stats = verify_snapshot(dest, table, unique_on=unique_on)
+        out[table] = {"path": dest, "deduped_rows": before - int(stats["rows"]), **stats}
+
+    for part in trans_parts + owner_parts:
+        part.unlink()
+    return out

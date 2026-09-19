@@ -272,6 +272,66 @@ LISTING_SNAPSHOTS_ARROW = pyar.schema(
 )
 
 
+# --- insider_trans · insider_owners (03 §4.10) --------------------------------
+# 분기 내부자 거래 데이터셋(Form 3·4·5) ZIP의 10개 TSV 중 셋만 쓴다:
+# SUBMISSION(공시 메타) · NONDERIV_TRANS/DERIV_TRANS(거래) · REPORTINGOWNER(신고인).
+# FOOTNOTES·*_HOLDING·OWNER_SIGNATURE 는 raw/ 에 두고 안 뽑는다.
+#
+# **PIT의 축은 `filing_date`다.** `trans_date`(거래일)와 며칠에서 몇 달까지
+# 벌어진다 — 거래일 기준으로 피쳐를 만들면 공시 전 정보를 쓰는 셈이 된다.
+#
+# 파생(옵션·RSU)과 비파생을 한 장에 담고 `is_derivative`로 가른다. 파생에만
+# 있는 컬럼 셋(행사가·기초주식수·만기)은 비파생 행에서 null이다.
+
+INSIDER_TRANS_ARROW = pyar.schema(
+    [
+        ("accession", pyar.string()),
+        ("is_derivative", pyar.bool_()),
+        ("trans_sk", pyar.int64()),  # 원천의 대리키. 위 둘과 합쳐 행을 가른다
+        ("issuer_cik", pyar.int64()),
+        ("issuer_symbol", pyar.string()),
+        ("doc_type", pyar.string()),  # 3 | 4 | 5 | 3/A | 4/A | 5/A
+        ("filing_date", pyar.date32()),  # PIT의 축
+        ("period_of_report", pyar.date32()),
+        ("security_title", pyar.string()),
+        ("trans_date", pyar.date32()),
+        ("trans_code", pyar.string()),  # P 매수 · S 매도 · A 수여 · F 세금 · M 행사 …
+        ("trans_form_type", pyar.string()),
+        ("equity_swap_involved", pyar.bool_()),
+        ("trans_shares", pyar.float64()),
+        ("trans_pricepershare", pyar.float64()),
+        ("acquired_disposed", pyar.string()),  # A | D — 방향이다
+        ("shares_owned_following", pyar.float64()),
+        ("direct_indirect", pyar.string()),  # D | I
+        ("conv_exercise_price", pyar.float64()),  # 파생만
+        ("underlying_shares", pyar.float64()),  # 파생만
+        ("expiration_date", pyar.date32()),  # 파생만
+        ("observed_at", pyar.timestamp("us", tz="UTC")),
+        ("source_rev", pyar.string()),  # 분기 태그 (2018q4)
+    ]
+)
+
+# 신고인은 공시 하나에 여럿이다 (2018q4에 최대 10명). 거래 표에 붙이면 행이
+# 곱해지므로 따로 둔다. `relationship`은 원천 문자열 그대로 남긴다 —
+# 쉼표로 끊긴 것("Director,Officer")과 붙어 온 것("DirectorOther")이 섞여 있다.
+
+INSIDER_OWNERS_ARROW = pyar.schema(
+    [
+        ("accession", pyar.string()),
+        ("owner_cik", pyar.int64()),
+        ("owner_name", pyar.string()),
+        ("relationship", pyar.string()),  # 원천 문자열
+        ("is_director", pyar.bool_()),
+        ("is_officer", pyar.bool_()),
+        ("is_ten_percent_owner", pyar.bool_()),
+        ("is_other", pyar.bool_()),
+        ("officer_title", pyar.string()),
+        ("observed_at", pyar.timestamp("us", tz="UTC")),
+        ("source_rev", pyar.string()),
+    ]
+)
+
+
 ARROW_SCHEMAS: dict[str, pyar.Schema] = {
     "prices_daily": PRICES_DAILY_ARROW,
     "corp_actions": CORP_ACTIONS_ARROW,
@@ -282,6 +342,8 @@ ARROW_SCHEMAS: dict[str, pyar.Schema] = {
     "filings_sub": FILINGS_SUB_ARROW,
     "midas_security_daily": MIDAS_SECURITY_DAILY_ARROW,
     "listing_snapshots": LISTING_SNAPSHOTS_ARROW,
+    "insider_trans": INSIDER_TRANS_ARROW,
+    "insider_owners": INSIDER_OWNERS_ARROW,
 }
 
 FRAME_SCHEMAS: dict[str, pa.DataFrameSchema] = {
