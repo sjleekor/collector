@@ -29,12 +29,20 @@ services:
     # Every collector run is a fresh `docker compose run --rm` container. The
     # KIS access token lasts a day and *every issuance sends the account holder
     # a KakaoTalk notification*, so a cache inside the container would mean one
-    # notification per scheduled job. This is the only reason the service has a
-    # volume at all.
+    # notification per scheduled job. That is why `./state` is mounted.
+    # `stock_data` is the second mount and has a different reason — see below.
     volumes:
       - ./state:/state
+      # 미국 레이크. 한국은 PostgreSQL이 원본이지만 미국은 parquet 파일이라
+      # 컨테이너 밖에 살아야 한다. 호스트 경로는 .env 의 STOCK_DATA_HOST_DIR 로
+      # 바꿀 수 있다 (기본 /home/whi/data/stock_data).
+      - ${STOCK_DATA_HOST_DIR:-/home/whi/data/stock_data}:/stock_data
     environment:
       KIS_TOKEN_CACHE_PATH: /state/kis_token.json
+      # 미국 (04 C8 · D18). 시장은 코드가 인자로 받는다 — 여기는 시장이 없다
+      STOCK_DATA_ROOT: /stock_data
+      # www.sec.gov 는 연락처 없는 UA에 403을 준다. 값은 .env 에만 둔다
+      SEC_USER_AGENT: ${SEC_USER_AGENT:-}
       DB_DSN: ""
       DB_HOST: db
       DB_PORT: 5432

@@ -1,35 +1,26 @@
-# deploy/local — 미국 상시 운영
+# deploy/local — 맥에서 하는 일
 
-**미국은 sj2-server로 안 간다** (미국 계획 D15). 이 맥에서 `launchd`로 돈다.
-서버 쪽에는 래퍼도 Cronicle 이벤트도 만들지 않는다.
+**수집은 여기서 안 한다. sj2-server가 한다** (미국 계획 D18 — 2026-09-20에 D15를 뒤집었다).
+**평일에 이 맥을 수집에 쓸 수 없다**는 것이 이유다.
 
-```bash
-deploy/local/install-launchd.sh install     # 매일 15:00 KST
-deploy/local/install-launchd.sh status
-deploy/local/install-launchd.sh uninstall
-```
-
-`plist`는 저장소에 없다. 경로가 기계마다 다르고 이 저장소는 public이라
-`install-launchd.sh`가 `~/Library/LaunchAgents/`에 만든다.
-
-| 무엇 | 어디 |
-|---|---|
-| 실행 로그 | `~/Library/Logs/collector-us/us-daily.log` |
-| launchd 자체 로그 | 같은 디렉터리의 `launchd.{out,err}.log` |
-| 산출물 | **로그가 아니다.** `$STOCK_DATA_ROOT/us/` 에 있다 |
-
-## 왜 15:00인가
-
-DoltHub가 **05:30 UTC = 14:30 KST**에 전일 데이터를 커밋한다. 그 뒤에 돌린다.
-미국 장 마감(05:00\~06:00 KST)과 겹치지 않는다 — 전일 데이터라 급하지 않다.
-
-## 맥이 꺼져 있던 날
-
-**따로 메꾸지 않는다.** `collector us-daily run`이 할 일을 일정이 아니라
-`raw/`에 무엇이 있나로 만든다. 마지막으로 받은 것부터 어제까지가 저절로
-대상이 된다. 며칠치가 밀리면 `--budget-seconds` 안에서 되는 만큼 하고
-나머지는 다음 실행이 이어서 한다.
+이 디렉터리에는 **서버에서 당겨 오는 것**만 있다. 한국이 `collector db sync-remote`로
+PostgreSQL을 당기는 자리에, 미국은 parquet이라 `rsync`가 온다.
 
 ```bash
-direnv exec . uv run collector us-daily run --dry-run   # 할 일만 센다
+deploy/local/us-mirror.sh            # 서버 → 맥, derived 만 (기본)
+deploy/local/us-mirror.sh --all      # raw 까지 (dolt clone 14GB 포함)
+deploy/local/us-mirror.sh --dry-run
 ```
+
+| | 서버 (`sj2-server`) | 맥 |
+|---|---|---|
+| 하는 일 | **수집.** Cronicle이 매일 부른다 | **모델링.** `modeler`가 읽는다 |
+| 원본 | `/home/whi/data/stock_data/us/` | 미러 |
+| 방향 | — | **서버 → 맥 한 방향.** 맥에서 고친 것은 다음 미러에 지워진다 |
+
+**기본이 `derived/`만인 이유.** `modeler`가 읽는 것은 스냅샷이다. `raw/`는 22GB고
+그중 14GB가 dolt clone인데 맥에서 그것을 읽을 일이 없다.
+
+> **`launchd` 스크립트는 지웠다.** D15(로컬 `launchd`)로 만들었던
+> `us-daily.sh`·`install-launchd.sh`가 여기 있었다. **등록한 적은 없다** —
+> 결정이 뒤집힌 것이 등록 전이었다.

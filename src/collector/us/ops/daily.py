@@ -285,9 +285,7 @@ def run_weekly_macro(
     if dry_run or not stale:
         return run
 
-    import os
-
-    from collector.us.sources import fred
+    from collector.us.sources import fred, sec
     from collector.us.sources import wikipedia as wp
 
     if "macro_series" in stale:
@@ -296,9 +294,12 @@ def run_weekly_macro(
         )
         run.fetched += 1
     if "index_constituents" in stale:
+        # 연락처 UA를 하나만 둔다 (`.env` 키를 늘리면 X21이 다시 난다).
+        # `user_agent_from_env`를 쓰는 이유는 **빈 문자열도 잡기 위해서**다 —
+        # compose가 `${SEC_USER_AGENT:-}`로 넘기면 키가 없어도 빈 값이 온다
         wp.load_index_constituents(
             root,
-            wp.WikipediaClient(user_agent=os.environ["SEC_USER_AGENT"]),
+            wp.WikipediaClient(user_agent=sec.user_agent_from_env()),
             snapshot_date=snapshot_date,
         )
         run.fetched += 1
