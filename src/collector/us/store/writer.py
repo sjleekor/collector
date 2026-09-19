@@ -40,6 +40,23 @@ def snapshot_path(root: DataRoot, table: str, snapshot_date: _date | str) -> Pat
     return root.derived / "snapshots" / table / f"snapshot_date={day}" / "part.parquet"
 
 
+def latest_snapshot(root: DataRoot, table: str) -> Path | None:
+    """그 표의 **가장 최근 스냅샷**. 없으면 ``None``.
+
+    상시 운영이 이걸 쓴다. 캘린더·거시처럼 천천히 바뀌는 표는 매일 다시 굳히지
+    않으므로 **오늘 날짜로 찾으면 늘 없다** — 실제로 C8 첫 실행이 그렇게 죽었다
+    (2026-09-20).
+    """
+    base = root.derived / "snapshots" / table
+    if not base.is_dir():
+        return None
+    parts = sorted(
+        (p for p in base.glob("snapshot_date=*/part.parquet")),
+        key=lambda p: p.parent.name,
+    )
+    return parts[-1] if parts else None
+
+
 def write_snapshot(
     frame: pd.DataFrame,
     table: str,

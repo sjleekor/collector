@@ -16,13 +16,20 @@ import sys
 from collector.kr.cli.app import build_parser as _build_kr_parser
 from collector.kr.infra.config.settings import get_settings
 from collector.kr.infra.logging.setup import setup_logging
+from collector.us.cli.app import register as _register_us
 
 logger = logging.getLogger(__name__)
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """최상위 파서. kr CLI의 서브파서 등록 결과에 ``--version``만 더한다."""
+    """최상위 파서. kr CLI의 서브파서 등록 결과에 ``us-*``와 ``--version``을 더한다."""
     parser = _build_kr_parser()
+    # 한국 파서가 만든 서브파서를 찾아 미국 명령을 얹는다. **한국 쪽 정의를
+    # 안 건드린다** — prod 래퍼 35개와 Cronicle 이벤트가 그 이름을 쓴다 (D10).
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            _register_us(action)
+            break
     parser.add_argument(
         "--version",
         action="version",

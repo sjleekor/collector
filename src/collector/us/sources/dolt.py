@@ -46,6 +46,36 @@ def _run(repo: Path, *args: str) -> str:
     return proc.stdout
 
 
+#: 로컬 미러의 merge 커밋에만 붙는 신원. **어디로도 푸시하지 않는다.**
+#: ``dolt pull``이 ff-only여도 신원을 먼저 요구해서(dolt 2.3.5) 없으면 못 돈다 —
+#: C8 첫 실행에서 레포 셋이 다 그렇게 멈췄다 (2026-09-20).
+LOCAL_AUTHOR_NAME = "collector"
+LOCAL_AUTHOR_EMAIL = "collector@localhost"
+
+
+def ensure_identity(repo: Path) -> bool:
+    """레포 **안에만** 신원을 둔다. 전역 설정(``~/.dolt``)을 건드리지 않는다.
+
+    사람의 이름·메일을 쓰지 않는다. 이 커밋은 읽기 전용 미러를 앞으로 감는
+    merge 커밋뿐이고 원격으로 나가지 않는다. 이미 있으면 아무것도 안 한다.
+    """
+    current = _run(repo, "config", "--local", "--list")
+    have = {
+        line.split(" = ", 1)[0].strip()
+        for line in current.splitlines()
+        if " = " in line
+    }
+    changed = False
+    for key, value in (
+        ("user.name", LOCAL_AUTHOR_NAME),
+        ("user.email", LOCAL_AUTHOR_EMAIL),
+    ):
+        if key not in have:
+            _run(repo, "config", "--local", "--add", key, value)
+            changed = True
+    return changed
+
+
 def head_commit(repo: Path) -> str:
     """``source_rev``로 쓸 커밋 해시. 스냅샷이 어느 시점 원천인지를 이게 잡는다."""
     out = _run(repo, "sql", "-q", "select commit_hash from dolt_log limit 1", "-r", "csv")
@@ -103,8 +133,9 @@ def pull(root: DataRoot, repo: str) -> dict[str, object]:
     **해시가 같으면 새로 굳힐 것이 없다** (05 §5 — 가격은 바뀐 것만 남긴다).
     """
     path = repo_dir(root, repo)
+    ensure_identity(path)  # 없으면 ff-only 여도 pull이 거부된다
     before = head_commit(path)
-    _run(path, "pull")
+    _run(path, "pull", "--silent")
     after = head_commit(path)
     return {"repo": repo, "before": before, "after": after, "changed": before != after}
 

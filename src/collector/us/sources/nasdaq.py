@@ -33,8 +33,11 @@ BROWSER_USER_AGENT = (
     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 )
 
-#: 05 §2의 2,016요청·2.8시간이 이 간격이다.
+#: 05 §2의 2,016요청·2.8시간이 이 간격이다. backfill은 더 좁혀 돌렸다 (04 §2.16).
 DEFAULT_INTERVAL_SECONDS = 5.0
+
+#: 검정 구간 시작 (07 X3). 그 앞은 가격에 생존편향이 있어 받아도 못 쓴다.
+EARNINGS_START = dt.date(2018, 7, 2)
 
 #: 안 쓰는 컬럼. 저장은 원문 그대로 하고 표에서만 뺀다.
 DROPPED_FIELDS = ("marketCap",)
