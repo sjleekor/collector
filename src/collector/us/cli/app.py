@@ -86,6 +86,35 @@ def _handle_load(args: argparse.Namespace) -> None:
     _print(func(_root(args), snapshot_date=_snapshot_date(args)))
 
 
+def _handle_universe_rebuild(args: argparse.Namespace) -> None:
+    from collector.us.universe import build
+
+    kwargs = {"start": args.start}
+    if args.end:
+        kwargs["end"] = args.end
+    _print(
+        build.build_universe_daily(
+            _root(args), snapshot_date=_snapshot_date(args), **kwargs
+        )
+    )
+
+
+def _handle_prune(args: argparse.Namespace) -> None:
+    from collector.us.ops import retention
+    from collector.us.store.schema import ARROW_SCHEMAS
+
+    tables = [args.table] if args.table else sorted(ARROW_SCHEMAS)
+    _print(
+        {
+            "apply": args.apply,
+            "tables": [
+                retention.prune_unchanged(_root(args), table, dry_run=not args.apply)
+                for table in tables
+            ],
+        }
+    )
+
+
 def register(subparsers: argparse._SubParsersAction) -> None:
     """최상위 파서에 ``us-*`` 서브커맨드를 단다."""
 
@@ -133,3 +162,27 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     )
     load_parser.add_argument("table", choices=sorted(_LOADERS))
     load_parser.set_defaults(handler=_handle_load)
+
+    uni_parser = subparsers.add_parser("us-universe", help="PIT 유니버스 (04 C4).")
+    uni_sub = uni_parser.add_subparsers(dest="us_universe_command", required=True)
+    uni_build = _common(
+        uni_sub.add_parser(
+            "rebuild",
+            help="유니버스를 다시 판정한다. **월 1회다** — 매일 하면 하루짜리 "
+            "거래량 급증에 흔들린다 (03 §5.3).",
+        )
+    )
+    uni_build.add_argument("--start", default="2018-09-07")
+    uni_build.add_argument("--end", default=None)
+    uni_build.set_defaults(handler=_handle_universe_rebuild)
+
+    prune_parser = _common(
+        subparsers.add_parser(
+            "us-prune", help="내용이 안 바뀐 스냅샷을 지운다 (04 C8 · 05 §5.1)."
+        )
+    )
+    prune_parser.add_argument("--table", default=None, help="한 표만. 기본은 전부.")
+    prune_parser.add_argument(
+        "--apply", action="store_true", help="실제로 지운다. 기본은 세기만 한다."
+    )
+    prune_parser.set_defaults(handler=_handle_prune)

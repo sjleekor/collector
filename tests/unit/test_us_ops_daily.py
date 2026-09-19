@@ -134,3 +134,51 @@ def test_source_run_serialises():
         "name": "x", "fetched": 1, "skipped": 0, "missing": [],
         "pending": 2, "ok": True, "note": "n",
     }
+
+
+# --- 스냅샷 보존 (04 C8 · 05 §5.1) -------------------------------------------
+
+
+def _calendar_snapshot(root: DataRoot, snapshot_date: str, end: str) -> None:
+    calendars.load_trading_calendar(
+        root, snapshot_date=snapshot_date, start="2026-09-01", end=end
+    )
+
+
+def test_prune_drops_a_snapshot_whose_content_did_not_change(tmp_path):
+    """`observed_at`이 달라 파일은 다르다. **내용으로 봐야 한다.**"""
+    from collector.us.ops import retention
+
+    root = _lake(tmp_path)
+    _calendar_snapshot(root, "2026-09-10", "2026-09-30")
+    _calendar_snapshot(root, "2026-09-11", "2026-09-30")  # 내용 같음
+    _calendar_snapshot(root, "2026-09-12", "2026-10-31")  # 내용 다름
+    _calendar_snapshot(root, "2026-09-13", "2026-10-31")  # 마지막 — 안 지운다
+
+    a, b = retention.snapshot_paths(root, "trading_calendar")[:2]
+    assert a.read_bytes() != b.read_bytes()  # observed_at 때문에 바이트는 다르다
+    assert retention.fingerprint(a, "trading_calendar") == retention.fingerprint(
+        b, "trading_calendar"
+    )
+
+    dry = retention.prune_unchanged(root, "trading_calendar")
+    assert dry["removed"] == ["snapshot_date=2026-09-11"]
+    assert len(retention.snapshot_paths(root, "trading_calendar")) == 4  # 안 지웠다
+
+    applied = retention.prune_unchanged(root, "trading_calendar", dry_run=False)
+    assert applied["removed"] == ["snapshot_date=2026-09-11"]
+    left = [p.parent.name for p in retention.snapshot_paths(root, "trading_calendar")]
+    assert left == [
+        "snapshot_date=2026-09-10",
+        "snapshot_date=2026-09-12",
+        "snapshot_date=2026-09-13",
+    ]
+
+
+def test_prune_never_touches_the_only_snapshot(tmp_path):
+    from collector.us.ops import retention
+
+    root = _lake(tmp_path)
+    _calendar_snapshot(root, "2026-09-10", "2026-09-30")
+    r = retention.prune_unchanged(root, "trading_calendar", dry_run=False)
+    assert r["removed"] == [] and r["kept"] == 1
