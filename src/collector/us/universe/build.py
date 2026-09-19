@@ -35,15 +35,27 @@ EXCLUDED_NAME_TOKENS = (
     " note due",
     " bond",
     "depositary",
-    "when issued",
-    "when-issued",
 )
 
+#: 이름만으로는 못 거르는 것. **nasdaqtrader가 이름의 "When Issued"를 안 지운다** —
+#: 분리상장이 끝난 뒤에도 몇 해씩 남아 있다 (2026-09-19 실측: 이름에 when issued가
+#: 든 74종목 중 64개는 심볼이 ``V``로 끝나는 진짜 WI 회선이고, 나머지 10개 중
+#: 9개는 DFS·DAN·AMCX·CVCO·BCH·CEG·SNDK 같은 **멀쩡히 거래되는 본주**다).
+#:
+#: **그래서 이름과 심볼을 함께 본다.** Nasdaq의 WI 회선은 심볼이 ``V``로 끝난다.
+WHEN_ISSUED_NAME_TOKENS = ("when issued", "when-issued")
 
-def _name_exclusion_sql(column: str) -> str:
-    """이름에 증권종류가 드러나면 뺀다. 소문자로 맞춰 비교한다."""
-    tests = " OR ".join(f"lower({column}) LIKE '%{t}%'" for t in EXCLUDED_NAME_TOKENS)
-    return f"({tests})"
+
+def _name_exclusion_sql(column: str, symbol_column: str = "b.symbol") -> str:
+    """이름에 증권종류가 드러나면 뺀다. 소문자로 맞춰 비교한다.
+
+    **when-issued만 심볼을 같이 본다.** 이름에만 기대면 CEG(거래대금 $556M)와
+    SNDK($8.0B)가 통째로 빠진다 — 원천이 이름을 안 고쳤을 뿐이다.
+    """
+    tests = [f"lower({column}) LIKE '%{t}%'" for t in EXCLUDED_NAME_TOKENS]
+    wi = " OR ".join(f"lower({column}) LIKE '%{t}%'" for t in WHEN_ISSUED_NAME_TOKENS)
+    tests.append(f"(({wi}) AND {symbol_column} LIKE '%V')")
+    return "(" + " OR ".join(tests) + ")"
 
 
 #: 20거래일 롤링을 예열하는 데 쓰는 달력일. 구간 첫날부터 바로 재면

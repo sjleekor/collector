@@ -383,6 +383,61 @@ COMPANY_META_ARROW = pyar.schema(
 )
 
 
+# --- trading_calendar (04 C5) ------------------------------------------------
+# exchange_calendars 를 그대로 굳힌다. 라이브러리 판이 바뀌면 과거 휴장일 판정이
+# 조용히 달라지므로 `source_rev`에 버전을 박는다.
+
+TRADING_CALENDAR_ARROW = pyar.schema(
+    [
+        ("date", pyar.date32()),
+        ("exchange", pyar.string()),
+        ("close_local", pyar.time64("us")),  # 거래소 현지 시각
+        ("is_early_close", pyar.bool_()),  # 13:00 마감. 거래량이 절반인 것이 정상이다
+        ("observed_at", pyar.timestamp("us", tz="UTC")),
+        ("source_rev", pyar.string()),  # exchange_calendars <버전>
+    ]
+)
+
+
+# --- macro_series (04 C5) ----------------------------------------------------
+# FRED/ALFRED. **`realtime_start`가 PIT의 축이다** — 그 값이 공개된 날이다.
+# 같은 `(series_id, date)`에 값이 여럿 있는 것이 정상이고 개정 이력이 그것이다.
+# 기준일 T의 값 = `realtime_start <= T` 중 최신. 재무의 `filed`와 같은 규칙이다.
+
+MACRO_SERIES_ARROW = pyar.schema(
+    [
+        ("series_id", pyar.string()),
+        ("axis", pyar.string()),  # 금리·유가·환율·신용·변동성·물가·고용·생산·통화·지수
+        ("date", pyar.date32()),  # 관측 기간
+        ("realtime_start", pyar.date32()),  # PIT의 축
+        ("value", pyar.float64()),  # 원천이 "."를 주면 null이다 (휴일·미발표)
+        ("observed_at", pyar.timestamp("us", tz="UTC")),
+        ("source_rev", pyar.string()),
+    ]
+)
+
+
+# --- index_constituents (04 C5) ----------------------------------------------
+# Wikipedia 리비전. `as_of`가 그 리비전 시각이고 `revid`가 버전 식별자다 (03 §3).
+#
+# **Wikipedia 반영 지연은 측정하지 않았다** (00 §의 "아직 모르는 것"). 편입·제외
+# 실제 발효일과 문서 수정 시각이 다를 수 있으므로 이벤트 스터디에 쓸 때 본다.
+
+INDEX_CONSTITUENTS_ARROW = pyar.schema(
+    [
+        ("index_id", pyar.string()),  # SP500
+        ("as_of", pyar.timestamp("us", tz="UTC")),  # 리비전 시각
+        ("revid", pyar.int64()),
+        ("symbol", pyar.string()),
+        ("security", pyar.string()),
+        ("gics_sector", pyar.string()),
+        ("gics_sub_industry", pyar.string()),
+        ("cik", pyar.string()),  # 앞자리 0이 있다. 문자열로 둔다
+        ("observed_at", pyar.timestamp("us", tz="UTC")),
+    ]
+)
+
+
 ARROW_SCHEMAS: dict[str, pyar.Schema] = {
     "prices_daily": PRICES_DAILY_ARROW,
     "corp_actions": CORP_ACTIONS_ARROW,
@@ -397,6 +452,9 @@ ARROW_SCHEMAS: dict[str, pyar.Schema] = {
     "insider_owners": INSIDER_OWNERS_ARROW,
     "filings_index": FILINGS_INDEX_ARROW,
     "company_meta": COMPANY_META_ARROW,
+    "trading_calendar": TRADING_CALENDAR_ARROW,
+    "macro_series": MACRO_SERIES_ARROW,
+    "index_constituents": INDEX_CONSTITUENTS_ARROW,
 }
 
 FRAME_SCHEMAS: dict[str, pa.DataFrameSchema] = {

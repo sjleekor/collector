@@ -25,27 +25,33 @@ def test_warmup_exists():
 
 
 @pytest.mark.parametrize(
-    "name,excluded",
+    "symbol,name,excluded",
     [
-        ("Alphabet Inc. - Class C Capital Stock", False),
-        ("Visa Inc.", False),
-        ("Taiwan Semiconductor Manufacturing Company Ltd.", False),
-        ("ASML Holding N.V. - New York Registry Shares", False),
-        ("SLB Limited Common Shares", False),
-        ("Oklo Inc. Class A common stock", False),
-        ("Acme Corp - Warrant", True),
-        ("Acme Corp 6.5% Preferred Series A", True),
-        ("Acme Corp - Right", True),
-        ("Acme Corp - Unit", True),
-        ("Acme Corp Depositary Shares", True),
+        ("GOOG", "Alphabet Inc. - Class C Capital Stock", False),
+        ("V", "Visa Inc.", False),
+        ("TSM", "Taiwan Semiconductor Manufacturing Company Ltd.", False),
+        ("ASML", "ASML Holding N.V. - New York Registry Shares", False),
+        ("SLB", "SLB Limited Common Shares", False),
+        ("OKLO", "Oklo Inc. Class A common stock", False),
+        ("ACME", "Acme Corp - Warrant", True),
+        ("ACME", "Acme Corp 6.5% Preferred Series A", True),
+        ("ACME", "Acme Corp - Right", True),
+        ("ACME", "Acme Corp - Unit", True),
+        ("ACME", "Acme Corp Depositary Shares", True),
+        # 원천이 분리상장 뒤에도 이름의 When-Issued를 안 지운다. 이름만 보면
+        # 거래대금 $556M·$8.0B짜리 본주가 통째로 빠진다 (2026-09-19)
+        ("CEG", "Constellation Energy Corporation - Common Stock When-Issued", False),
+        ("SNDK", "Sandisk Corporation - Common Stock When-Issued", False),
+        # 진짜 WI 회선은 심볼이 V로 끝난다
+        ("LILAV", "Liberty Latin America Ltd. - Class A Common Stock When Issued", True),
     ],
 )
-def test_name_exclusion_is_a_denylist_not_an_allowlist(name, excluded):
+def test_name_exclusion_is_a_denylist_not_an_allowlist(symbol, name, excluded):
     """포함 목록으로 거르면 GOOG·V·TSM·ASML 이 빠진다 (03 §5.1)."""
     con = duckdb.connect()
-    con.execute("CREATE TABLE t (security_name VARCHAR)")
-    con.execute("INSERT INTO t VALUES (?)", [name])
-    sql = build._name_exclusion_sql("security_name")
+    con.execute("CREATE TABLE t (symbol VARCHAR, security_name VARCHAR)")
+    con.execute("INSERT INTO t VALUES (?, ?)", [symbol, name])
+    sql = build._name_exclusion_sql("security_name", "symbol")
     got = con.execute(f"SELECT {sql} FROM t").fetchone()[0]
     assert bool(got) is excluded, name
 
