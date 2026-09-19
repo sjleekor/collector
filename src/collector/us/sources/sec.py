@@ -24,6 +24,8 @@ from pathlib import Path
 
 import requests
 
+from collector.lake import DataRoot
+
 BASE = "https://www.sec.gov"
 DATA_BASE = "https://data.sec.gov"
 
@@ -75,11 +77,24 @@ def insider_url(year: int, quarter: int) -> str:
     )
 
 
+#: 목록 페이지가 규칙과 다른 경로로 거는 분기. SEC 쪽 발행 실수로 보인다 —
+#: 58개 링크 중 2019 Q4 하나만 Drupal 내부 경로(``/files/node/add/...``)를
+#: 가리킨다. 규칙대로 만든 URL은 404고 이쪽은 200이다 (2026-09-19 실측).
+#: 2012 Q1의 ``q10`` 예외는 검정 구간 밖이라 여기 없다.
+MIDAS_URL_EXCEPTIONS: dict[tuple[int, int], str] = {
+    (2019, 4): f"{BASE}/files/node/add/data_distribution/individual_security_2019_q4.zip",
+}
+
+
 def midas_url(year: int, quarter: int) -> str:
     """MIDAS 일별 종목 지표. ``McapRank``가 일별 횡단면 decile이다.
 
-    2012 Q1만 파일명이 ``q10``으로 규칙에서 벗어나는데 검정 구간 밖이다.
+    **규칙으로 만들되 예외표를 먼저 본다.** 404가 나면 목록 페이지
+    (``/data-research/sec-markets-data/marketstructuredata-security``)의
+    ``href``를 확인한다 — 파일이 없는 게 아니라 경로가 다를 수 있다.
     """
+    if (year, quarter) in MIDAS_URL_EXCEPTIONS:
+        return MIDAS_URL_EXCEPTIONS[(year, quarter)]
     return (
         f"{BASE}/files/opa/data/market-structure/metrics-individual-security/"
         f"individual_security_{year}_q{quarter}.zip"
@@ -159,3 +174,51 @@ def assert_is_zip(path: Path) -> list[str]:
     if not names:
         raise SecAccessError(f"{path}: entry가 없다")
     return names
+
+
+#: 분기 ZIP 세 갈래. 값은 (연, 분기) -> URL 함수다.
+QUARTERLY_KINDS = {
+    "financial": financial_statements_url,
+    "insider": insider_url,
+    "midas": midas_url,
+}
+
+
+def quarterly_path(root: DataRoot, kind: str, year: int, quarter: int) -> Path:
+    """``raw/sec/quarterly/<kind>/<YYYY>q<Q>.zip`` — 원문을 그대로 둔다 (02 §1)."""
+    if kind not in QUARTERLY_KINDS:
+        raise ValueError(f"모르는 갈래: {kind!r} (있는 것: {sorted(QUARTERLY_KINDS)})")
+    return root.raw / "sec" / "quarterly" / kind / f"{year}q{quarter}.zip"
+
+
+def download_quarterly(
+    client: SecClient,
+    root: DataRoot,
+    kind: str,
+    year: int,
+    quarter: int,
+    *,
+    skip_existing: bool = True,
+) -> dict[str, object]:
+    """분기 ZIP 하나를 ``raw/``에 굳힌다. 이미 멀쩡하면 건너뛴다.
+
+    **받자마자 열어 본다** — 403 HTML을 ``.zip``으로 저장한 것은 크기만
+    봐서는 못 잡는다 (06 §1). 이어받기가 되는 이유도 이것이다: 열리는
+    파일만 "받았다"로 친다.
+    """
+    dest = quarterly_path(root, kind, year, quarter)
+    if skip_existing and dest.is_file():
+        try:
+            entries = assert_is_zip(dest)
+            return {
+                "path": dest,
+                "skipped": True,
+                "entries": len(entries),
+                "bytes": dest.stat().st_size,
+            }
+        except SecAccessError:
+            dest.unlink()  # 깨진 것은 다시 받는다
+
+    client.download(QUARTERLY_KINDS[kind](year, quarter), dest)
+    entries = assert_is_zip(dest)
+    return {"path": dest, "skipped": False, "entries": len(entries), "bytes": dest.stat().st_size}

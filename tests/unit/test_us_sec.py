@@ -58,6 +58,16 @@ def test_url_shapes():
     assert sec.midas_url(2018, 4).endswith("/individual_security_2018_q4.zip")
 
 
+def test_midas_2019q4_uses_the_exception_path():
+    """SEC 목록이 이 한 분기만 Drupal 내부 경로로 건다. 규칙대로 만들면 404다."""
+    assert (2019, 4) in sec.MIDAS_URL_EXCEPTIONS
+    assert "/files/node/add/data_distribution/" in sec.midas_url(2019, 4)
+    # 이웃 분기는 규칙 그대로여야 한다
+    for q in (3,):
+        assert "metrics-individual-security" in sec.midas_url(2019, q)
+    assert "metrics-individual-security" in sec.midas_url(2020, 1)
+
+
 # --- 403은 재시도하지 않는다 -------------------------------------------------
 
 
@@ -118,3 +128,61 @@ def test_download_leaves_no_partial_file_behind(tmp_path):
     client.download("https://www.sec.gov/f.zip", dest)
     assert dest.read_bytes() == b"PK\x03\x04"
     assert not list(dest.parent.glob("*.part"))
+
+
+# --- 분기 ZIP 내려받기 -------------------------------------------------------
+
+
+def test_quarterly_path_layout(tmp_path):
+    from collector.lake import DataRoot
+
+    p = sec.quarterly_path(DataRoot(tmp_path), "financial", 2018, 4)
+    assert p.parts[-4:] == ("sec", "quarterly", "financial", "2018q4.zip")
+
+
+def test_quarterly_path_rejects_unknown_kind(tmp_path):
+    from collector.lake import DataRoot
+
+    with pytest.raises(ValueError, match="모르는 갈래"):
+        sec.quarterly_path(DataRoot(tmp_path), "nope", 2018, 4)
+
+
+def _zip_bytes():
+    import io as _io
+
+    buf = _io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("sub.txt", "adsh\tcik\tsic\n")
+    return buf.getvalue()
+
+
+def test_download_quarterly_skips_a_good_file(tmp_path):
+    from collector.lake import DataRoot
+
+    root = DataRoot(tmp_path)
+    dest = sec.quarterly_path(root, "midas", 2020, 1)
+    dest.parent.mkdir(parents=True)
+    dest.write_bytes(_zip_bytes())
+    session = _Session(_Resp(200, b"should-not-be-used"))
+    r = sec.download_quarterly(
+        sec.SecClient("x/1 (a@b.c)", session=session), root, "midas", 2020, 1
+    )
+    assert r["skipped"] is True
+    assert session.calls == []  # 요청을 아예 안 보낸다
+
+
+def test_download_quarterly_refetches_a_broken_file(tmp_path):
+    """403 HTML이 .zip으로 남아 있으면 지우고 다시 받는다 — 이어받기의 근거다."""
+    from collector.lake import DataRoot
+
+    root = DataRoot(tmp_path)
+    dest = sec.quarterly_path(root, "midas", 2020, 1)
+    dest.parent.mkdir(parents=True)
+    dest.write_bytes(b"<html>Request Rate Threshold Exceeded</html>")
+    session = _Session(_Resp(200, _zip_bytes()))
+    r = sec.download_quarterly(
+        sec.SecClient("x/1 (a@b.c)", session=session), root, "midas", 2020, 1
+    )
+    assert r["skipped"] is False
+    assert len(session.calls) == 1
+    assert sec.assert_is_zip(dest) == ["sub.txt"]
