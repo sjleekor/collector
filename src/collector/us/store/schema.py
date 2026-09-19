@@ -245,6 +245,33 @@ MIDAS_SECURITY_DAILY_ARROW = pyar.schema(
 )
 
 
+# --- listing_snapshots (03 §4.9) ---------------------------------------------
+# Wayback 이 뜬 nasdaqtrader 심볼 디렉터리. is_etf·test_issue 의 PIT 원천이다
+# (dolt symbol 은 PK가 act_symbol 하나뿐이라 오늘 값만 있다 — 03 §5.4).
+#
+# as_of 는 파일이 스스로 밝힌 "File Creation Time" 이다. 아카이브 timestamp 가
+# 아니다 (03 §3).
+
+LISTING_SNAPSHOTS_ARROW = pyar.schema(
+    [
+        ("as_of", pyar.date32()),
+        ("as_of_time", pyar.timestamp("us")),  # 거래소 현지 시각. tz 표기가 없다
+        ("kind", pyar.string()),  # nasdaqlisted | otherlisted
+        ("snapshot", pyar.string()),  # Wayback timestamp
+        ("symbol", pyar.string()),
+        ("security_name", pyar.string()),
+        ("exchange", pyar.string()),
+        ("market_category", pyar.string()),
+        ("is_etf", pyar.bool_()),  # 옛 파일에 컬럼이 없으면 null
+        ("test_issue", pyar.bool_()),
+        ("financial_status", pyar.string()),
+        ("round_lot_size", pyar.int32()),
+        ("observed_at", pyar.timestamp("us", tz="UTC")),
+        ("source_rev", pyar.string()),  # 원문 파일 이름
+    ]
+)
+
+
 ARROW_SCHEMAS: dict[str, pyar.Schema] = {
     "prices_daily": PRICES_DAILY_ARROW,
     "corp_actions": CORP_ACTIONS_ARROW,
@@ -254,6 +281,7 @@ ARROW_SCHEMAS: dict[str, pyar.Schema] = {
     "volatility_daily": VOLATILITY_DAILY_ARROW,
     "filings_sub": FILINGS_SUB_ARROW,
     "midas_security_daily": MIDAS_SECURITY_DAILY_ARROW,
+    "listing_snapshots": LISTING_SNAPSHOTS_ARROW,
 }
 
 FRAME_SCHEMAS: dict[str, pa.DataFrameSchema] = {
