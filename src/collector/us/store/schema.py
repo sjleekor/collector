@@ -200,6 +200,51 @@ VOLATILITY_DAILY_ARROW = pyar.schema(
 )
 
 
+# --- filings_sub (03 §4.7) ---------------------------------------------------
+# 분기 재무 데이터셋 sub.txt 의 36컬럼 중 공시 메타만. sic 이 filing 시점
+# 값이라 PIT 이고, filed 가 그 축이다.
+
+FILINGS_SUB_ARROW = pyar.schema(
+    [
+        ("adsh", pyar.string()),  # accession. 행의 키
+        ("cik", pyar.int64()),
+        ("name", pyar.string()),
+        ("sic", pyar.string()),  # 앞자리 0이 있다. 숫자로 만들지 않는다
+        ("form", pyar.string()),
+        ("period", pyar.date32()),
+        ("fy", pyar.int32()),
+        ("fp", pyar.string()),
+        ("filed", pyar.date32()),  # PIT의 축
+        ("fye", pyar.string()),  # MMDD. 역시 앞자리 0이 있다
+        ("prevrpt", pyar.bool_()),
+        ("countryba", pyar.string()),
+        ("former", pyar.string()),
+        ("changed", pyar.date32()),
+        ("observed_at", pyar.timestamp("us", tz="UTC")),
+        ("source_rev", pyar.string()),  # 분기 태그 (2018q4)
+    ]
+)
+
+
+# --- midas_security_daily (03 §4.8) ------------------------------------------
+# 19컬럼 중 순위 넷만. 나머지 호가 미시구조 지표는 raw/ 에 두고 안 뽑는다.
+# rank 값 형식이 연도마다 "1" / "1.0" 으로 달라 숫자로 파싱한다.
+
+MIDAS_SECURITY_DAILY_ARROW = pyar.schema(
+    [
+        ("date", pyar.date32()),
+        ("ticker", pyar.string()),
+        ("security_type", pyar.string()),  # Stock | ETF
+        ("mcap_rank", pyar.int32()),  # 일별 횡단면 decile
+        ("turn_rank", pyar.int32()),
+        ("volatility_rank", pyar.int32()),
+        ("price_rank", pyar.int32()),
+        ("observed_at", pyar.timestamp("us", tz="UTC")),
+        ("source_rev", pyar.string()),
+    ]
+)
+
+
 ARROW_SCHEMAS: dict[str, pyar.Schema] = {
     "prices_daily": PRICES_DAILY_ARROW,
     "corp_actions": CORP_ACTIONS_ARROW,
@@ -207,6 +252,8 @@ ARROW_SCHEMAS: dict[str, pyar.Schema] = {
     "short_interest": SHORT_INTEREST_ARROW,
     "universe_daily": UNIVERSE_DAILY_ARROW,
     "volatility_daily": VOLATILITY_DAILY_ARROW,
+    "filings_sub": FILINGS_SUB_ARROW,
+    "midas_security_daily": MIDAS_SECURITY_DAILY_ARROW,
 }
 
 FRAME_SCHEMAS: dict[str, pa.DataFrameSchema] = {

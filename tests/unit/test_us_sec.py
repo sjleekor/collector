@@ -186,3 +186,56 @@ def test_download_quarterly_refetches_a_broken_file(tmp_path):
     assert r["skipped"] is False
     assert len(session.calls) == 1
     assert sec.assert_is_zip(dest) == ["sub.txt"]
+
+
+# --- 추출 규칙 ---------------------------------------------------------------
+
+
+def test_midas_member_must_be_exactly_one_csv(tmp_path):
+    """파일명 규칙(q4_2018_all.csv)을 믿지 않고 목록에서 고른다."""
+    p = tmp_path / "m.zip"
+    with zipfile.ZipFile(p, "w") as zf:
+        zf.writestr("README.txt", "x")
+        zf.writestr("q4_2018_all.csv", "Date,Ticker\n")
+    assert sec._midas_member(p, 2018, 4) == "q4_2018_all.csv"
+
+
+def test_midas_member_rejects_ambiguous_zip(tmp_path):
+    p = tmp_path / "m.zip"
+    with zipfile.ZipFile(p, "w") as zf:
+        zf.writestr("a.csv", "x")
+        zf.writestr("b.csv", "y")
+    with pytest.raises(sec.SecAccessError, match="CSV가 하나가 아니다"):
+        sec._midas_member(p, 2018, 4)
+
+
+def test_midas_dedup_rule_keeps_the_fuller_row():
+    """원천에 (Date,Ticker) 중복이 있다 — 한쪽은 순위가 비어 온다 (03 §4.8)."""
+    import duckdb
+
+    con = duckdb.connect()
+    con.execute(
+        "CREATE TABLE t (date DATE, ticker VARCHAR, mcap_rank INT, turn_rank INT, "
+        "volatility_rank INT, price_rank INT)"
+    )
+    con.execute("INSERT INTO t VALUES (DATE '2018-07-16','SPB',8,10,9,9)")
+    con.execute("INSERT INTO t VALUES (DATE '2018-07-16','SPB',NULL,NULL,9,NULL)")
+    con.execute("INSERT INTO t VALUES (DATE '2025-11-18','OPEN',9,10,10,4)")
+    con.execute("INSERT INTO t VALUES (DATE '2025-11-18','OPEN',9,10,10,4)")
+    kept = con.execute("""
+        SELECT date, ticker, mcap_rank FROM (
+            SELECT *,
+                   (mcap_rank IS NOT NULL)::INT + (turn_rank IS NOT NULL)::INT
+                 + (volatility_rank IS NOT NULL)::INT
+                 + (price_rank IS NOT NULL)::INT AS rank_filled
+            FROM t
+        )
+        QUALIFY row_number() OVER (PARTITION BY date, ticker ORDER BY rank_filled DESC,
+                mcap_rank NULLS LAST, turn_rank NULLS LAST,
+                volatility_rank NULLS LAST, price_rank NULLS LAST) = 1
+        ORDER BY date
+        """).fetchall()
+    assert kept == [
+        (__import__("datetime").date(2018, 7, 16), "SPB", 8),
+        (__import__("datetime").date(2025, 11, 18), "OPEN", 9),
+    ]

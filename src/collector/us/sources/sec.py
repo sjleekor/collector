@@ -222,3 +222,190 @@ def download_quarterly(
     client.download(QUARTERLY_KINDS[kind](year, quarter), dest)
     entries = assert_is_zip(dest)
     return {"path": dest, "skipped": False, "entries": len(entries), "bytes": dest.stat().st_size}
+
+
+def _member_to_temp(zip_path: Path, member: str, dest: Path) -> Path:
+    """ZIP 안의 멤버 하나를 임시 파일로 푼다."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(zip_path) as zf, zf.open(member) as src, dest.open("wb") as out:
+        while chunk := src.read(1 << 20):
+            out.write(chunk)
+    return dest
+
+
+def _midas_member(zip_path: Path, year: int, quarter: int) -> str:
+    """MIDAS CSV 이름. ``q4_2018_all.csv`` 꼴인데 규칙을 믿지 않고 목록에서 고른다."""
+    names = [n for n in assert_is_zip(zip_path) if n.lower().endswith(".csv")]
+    if len(names) != 1:
+        raise SecAccessError(f"{zip_path}: CSV가 하나가 아니다 — {names}")
+    return names[0]
+
+
+def extract_filings_sub(
+    root: DataRoot,
+    *,
+    snapshot_date,
+    observed_at=None,
+    work_dir: Path | None = None,
+) -> dict[str, object]:
+    """분기 ZIP들의 ``sub.txt``를 ``filings_sub`` 한 장으로 (03 §4.7).
+
+    **업종 PIT의 원천이다.** ``sic``이 filing 시점 값이고 ``filed``가 축이다.
+    """
+    import datetime as _dt
+
+    import duckdb
+
+    from collector.us.store.writer import snapshot_path, verify_snapshot
+
+    observed_at = observed_at or _dt.datetime.now(_dt.UTC)
+    work_dir = work_dir or (root.output / "_tmp" / "filings_sub")
+    work_dir.mkdir(parents=True, exist_ok=True)
+    con = duckdb.connect()
+    parts, missing = [], []
+
+    for y, q in quarters((2018, 3), (2026, 2)):
+        zp = quarterly_path(root, "financial", y, q)
+        if not zp.is_file():
+            missing.append(f"{y}q{q}")
+            continue
+        tmp = _member_to_temp(zp, "sub.txt", work_dir / f"{y}q{q}_sub.txt")
+        part = work_dir / f"{y}q{q}.parquet"
+        con.execute(
+            f"""
+            COPY (
+                SELECT adsh,
+                       CAST(cik AS BIGINT)                       AS cik,
+                       name,
+                       sic,                              -- 앞자리 0이 있다. 문자열로 둔다
+                       form,
+                       try_strptime(period,  '%Y%m%d')::DATE     AS period,
+                       TRY_CAST(fy AS INTEGER)                   AS fy,
+                       fp,
+                       try_strptime(filed,   '%Y%m%d')::DATE     AS filed,
+                       fye,
+                       COALESCE(TRY_CAST(prevrpt AS INTEGER), 0) <> 0 AS prevrpt,
+                       countryba,
+                       former,
+                       try_strptime(changed, '%Y%m%d')::DATE     AS changed,
+                       CAST(? AS TIMESTAMP WITH TIME ZONE)       AS observed_at,
+                       CAST(? AS VARCHAR)                        AS source_rev
+                FROM read_csv('{tmp}', delim='\t', header=true, quote='',
+                              escape='', all_varchar=true)
+            ) TO '{part}' (FORMAT PARQUET)
+            """,
+            [observed_at, f"{y}q{q}"],
+        )
+        tmp.unlink()
+        parts.append(part)
+
+    if not parts:
+        raise SecAccessError("분기 재무 ZIP이 하나도 없다. 먼저 받는다.")
+
+    dest = snapshot_path(root, "filings_sub", snapshot_date)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    con.execute(
+        f"COPY (SELECT * FROM read_parquet('{work_dir}/*.parquet'))"
+        f" TO '{dest}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+    )
+    for part in parts:
+        part.unlink()
+    stats = verify_snapshot(dest, "filings_sub", unique_on=("adsh",))
+    return {"path": dest, "quarters": len(parts), "missing": missing, **stats}
+
+
+def extract_midas(
+    root: DataRoot,
+    *,
+    snapshot_date,
+    observed_at=None,
+    work_dir: Path | None = None,
+) -> dict[str, object]:
+    """분기 MIDAS CSV들을 ``midas_security_daily`` 한 장으로 (03 §4.8).
+
+    순위 넷만 뽑는다. rank 값이 연도마다 ``"1"``/``"1.0"``으로 와서 숫자로 파싱한다.
+    """
+    import datetime as _dt
+
+    import duckdb
+
+    from collector.us.store.writer import snapshot_path, verify_snapshot
+
+    observed_at = observed_at or _dt.datetime.now(_dt.UTC)
+    work_dir = work_dir or (root.output / "_tmp" / "midas")
+    work_dir.mkdir(parents=True, exist_ok=True)
+    con = duckdb.connect()
+    parts, missing = [], []
+
+    for y, q in quarters((2018, 3), (2026, 2)):
+        zp = quarterly_path(root, "midas", y, q)
+        if not zp.is_file():
+            missing.append(f"{y}q{q}")
+            continue
+        tmp = _member_to_temp(zp, _midas_member(zp, y, q), work_dir / f"{y}q{q}.csv")
+        part = work_dir / f"{y}q{q}.parquet"
+        con.execute(
+            f"""
+            COPY (
+                SELECT try_strptime("Date", '%Y%m%d')::DATE            AS date,
+                       "Ticker"                                        AS ticker,
+                       "Security"                                      AS security_type,
+                       -- "1" 과 "1.0" 이 섞여 온다. DOUBLE 로 받고 내린다.
+                       CAST(TRY_CAST("McapRank"       AS DOUBLE) AS INTEGER) AS mcap_rank,
+                       CAST(TRY_CAST("TurnRank"       AS DOUBLE) AS INTEGER) AS turn_rank,
+                       CAST(TRY_CAST("VolatilityRank" AS DOUBLE) AS INTEGER) AS volatility_rank,
+                       CAST(TRY_CAST("PriceRank"      AS DOUBLE) AS INTEGER) AS price_rank,
+                       CAST(? AS TIMESTAMP WITH TIME ZONE)             AS observed_at,
+                       CAST(? AS VARCHAR)                              AS source_rev
+                FROM read_csv('{tmp}', header=true, all_varchar=true)
+            ) TO '{part}' (FORMAT PARQUET)
+            """,
+            [observed_at, f"{y}q{q}"],
+        )
+        tmp.unlink()
+        parts.append(part)
+
+    if not parts:
+        raise SecAccessError("MIDAS ZIP이 하나도 없다. 먼저 받는다.")
+
+    dest = snapshot_path(root, "midas_security_daily", snapshot_date)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    # 원천에 (Date, Ticker) 중복이 있다. 두 모양이다 (2026-09-19 실측, 756조합):
+    #   1. 완전히 같은 행이 2~3번 (457행)
+    #   2. 한 행은 순위 넷이 다 차 있고 다른 행은 VolatilityRank 만 있고 나머지가 빈다
+    # 채워진 것을 남긴다 — 비어 있는 쪽은 정보가 없다. 완전 동일이면 아무거나 같다.
+    # 몇 행을 버렸는지 돌려주므로 조용히 사라지지 않는다.
+    before = con.execute(
+        f"SELECT count(*) FROM read_parquet('{work_dir}/*.parquet')"
+    ).fetchone()[0]
+    con.execute(
+        f"""
+        COPY (
+            SELECT * EXCLUDE (rank_filled)
+            FROM (
+                SELECT *,
+                       (mcap_rank IS NOT NULL)::INT + (turn_rank IS NOT NULL)::INT
+                     + (volatility_rank IS NOT NULL)::INT + (price_rank IS NOT NULL)::INT
+                       AS rank_filled
+                FROM read_parquet('{work_dir}/*.parquet')
+            )
+            QUALIFY row_number() OVER (
+                PARTITION BY date, ticker
+                ORDER BY rank_filled DESC,
+                         mcap_rank NULLS LAST, turn_rank NULLS LAST,
+                         volatility_rank NULLS LAST, price_rank NULLS LAST
+            ) = 1
+        ) TO '{dest}' (FORMAT PARQUET, COMPRESSION ZSTD)
+        """
+    )
+    for part in parts:
+        part.unlink()
+    stats = verify_snapshot(dest, "midas_security_daily", unique_on=("date", "ticker"))
+    return {
+        "path": dest,
+        "quarters": len(parts),
+        "missing": missing,
+        "deduped_rows": before - int(stats["rows"]),
+        **stats,
+    }
