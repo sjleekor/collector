@@ -332,6 +332,57 @@ INSIDER_OWNERS_ARROW = pyar.schema(
 )
 
 
+# --- filings_index · company_meta (03 §4.11·§4.12) ---------------------------
+# submissions.zip. `filings_sub`(분기 재무 데이터셋)가 재무제표를 낸 공시만
+# 담는 데 비해 이쪽은 **모든 공시**다 — 8-K·13D·S-1까지 날짜가 나온다.
+#
+# `acceptance_datetime`을 날짜로 깎지 않는다. 장 마감 뒤 접수된 공시는 그날
+# 종가에 못 쓴다. 날짜만 남기면 그 판단을 영영 못 한다.
+
+FILINGS_INDEX_ARROW = pyar.schema(
+    [
+        ("cik", pyar.int64()),
+        ("accession", pyar.string()),
+        ("form", pyar.string()),
+        ("filing_date", pyar.date32()),
+        ("report_date", pyar.date32()),
+        ("acceptance_datetime", pyar.timestamp("us", tz="UTC")),
+        ("act", pyar.string()),
+        ("file_number", pyar.string()),
+        ("items", pyar.string()),  # 8-K 항목 번호. 쉼표로 여럿
+        ("core_type", pyar.string()),
+        ("primary_document", pyar.string()),
+        ("is_xbrl", pyar.bool_()),
+        ("is_inline_xbrl", pyar.bool_()),
+        ("size", pyar.int64()),
+        ("observed_at", pyar.timestamp("us", tz="UTC")),
+        ("source_rev", pyar.string()),  # <파일>:<바이트> — 크기가 변경 신호다
+    ]
+)
+
+# 발행사 한 줄. **현재값이다 — PIT가 아니다.** `former_names`만 이력을 갖는다
+# (JSON 문자열 그대로 둔다). 업종 PIT는 `filings_sub`의 `sic`을 쓴다.
+
+COMPANY_META_ARROW = pyar.schema(
+    [
+        ("cik", pyar.int64()),
+        ("name", pyar.string()),
+        ("entity_type", pyar.string()),
+        ("sic", pyar.string()),
+        ("sic_description", pyar.string()),
+        ("category", pyar.string()),  # Large accelerated filer …
+        ("fiscal_year_end", pyar.string()),  # MMDD
+        ("state_of_incorporation", pyar.string()),
+        ("ein", pyar.string()),
+        ("tickers", pyar.string()),  # 쉼표로 여럿. 현재 매핑이다
+        ("exchanges", pyar.string()),
+        ("former_names", pyar.string()),  # 원천 JSON 그대로
+        ("observed_at", pyar.timestamp("us", tz="UTC")),
+        ("source_rev", pyar.string()),
+    ]
+)
+
+
 ARROW_SCHEMAS: dict[str, pyar.Schema] = {
     "prices_daily": PRICES_DAILY_ARROW,
     "corp_actions": CORP_ACTIONS_ARROW,
@@ -344,6 +395,8 @@ ARROW_SCHEMAS: dict[str, pyar.Schema] = {
     "listing_snapshots": LISTING_SNAPSHOTS_ARROW,
     "insider_trans": INSIDER_TRANS_ARROW,
     "insider_owners": INSIDER_OWNERS_ARROW,
+    "filings_index": FILINGS_INDEX_ARROW,
+    "company_meta": COMPANY_META_ARROW,
 }
 
 FRAME_SCHEMAS: dict[str, pa.DataFrameSchema] = {

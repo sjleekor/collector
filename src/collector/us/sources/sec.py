@@ -134,16 +134,25 @@ class SecClient:
         if self._last_request_at and gap < self.interval_seconds:
             time.sleep(self.interval_seconds - gap)
 
-    def get(self, url: str, *, stream: bool = True) -> requests.Response:
-        """한 번 요청한다. **403은 재시도하지 않는다.**"""
+    def get(
+        self,
+        url: str,
+        *,
+        stream: bool = True,
+        headers: dict[str, str] | None = None,
+        ok: tuple[int, ...] = (200,),
+    ) -> requests.Response:
+        """한 번 요청한다. **403은 재시도하지 않는다.**
+
+        ``headers``로 ``Range``를 넣으면 ``ok=(200, 206)``으로 받는다 — 서버가
+        Range를 무시하고 200으로 전부 보낼 수 있어 부르는 쪽이 둘 다 다뤄야 한다.
+        """
         self._wait()
+        sent = {"User-Agent": self.user_agent, "Accept-Encoding": "gzip, deflate"}
+        if headers:
+            sent.update(headers)
         try:
-            resp = self.session.get(
-                url,
-                headers={"User-Agent": self.user_agent, "Accept-Encoding": "gzip, deflate"},
-                stream=stream,
-                timeout=120,
-            )
+            resp = self.session.get(url, headers=sent, stream=stream, timeout=120)
         finally:
             self._last_request_at = time.monotonic()
         if resp.status_code == 403:
@@ -152,7 +161,7 @@ class SecClient:
                 "본문이 rate 초과라고 해도 속도 문제가 아닐 수 있다. "
                 "UA에 연락처가 들어 있는지 먼저 본다 (01 §1.1). 재시도하지 않는다."
             )
-        if resp.status_code != 200:
+        if resp.status_code not in ok:
             raise SecAccessError(f"{resp.status_code} {url}")
         return resp
 
@@ -598,3 +607,86 @@ def extract_insider(
     for part in trans_parts + owner_parts:
         part.unlink()
     return out
+
+
+#: 벌크 ZIP 둘. CIK별 1만 2천 요청을 2요청으로 바꾼다 (D5).
+BULK_URLS = {
+    "companyfacts": COMPANYFACTS_BULK_URL,
+    "submissions": SUBMISSIONS_BULK_URL,
+}
+
+
+def bulk_path(root: DataRoot, kind: str) -> Path:
+    """``raw/sec/bulk/<kind>.zip`` (02 §1)."""
+    if kind not in BULK_URLS:
+        raise ValueError(f"모르는 갈래: {kind!r} (있는 것: {sorted(BULK_URLS)})")
+    return root.raw / "sec" / "bulk" / f"{kind}.zip"
+
+
+def download_bulk(
+    client: SecClient,
+    root: DataRoot,
+    kind: str,
+    *,
+    budget_seconds: float | None = None,
+    skip_existing: bool = True,
+) -> dict[str, object]:
+    """벌크 ZIP 하나를 ``raw/``에 굳힌다. **끊기면 이어받는다.**
+
+    1.4GB·1.6GB라 한 번에 다 받다가 끊기면 처음부터다. SEC가
+    ``Accept-Ranges: bytes``를 주므로 ``.part``의 크기만큼 건너뛰고 붙인다
+    (2026-09-19 실측). ``budget_seconds``를 주면 그 시간이 지날 때 멈추고
+    ``done=False``로 돌아온다 — 다음 호출이 이어서 받는다.
+
+    **서버가 Range를 무시하면 처음부터 다시 받는다.** 206이 아니라 200이 오면
+    받은 것을 버리고 새로 쓴다. 안 그러면 파일 가운데가 겹쳐 깨진다.
+    """
+    dest = bulk_path(root, kind)
+    if skip_existing and dest.is_file():
+        try:
+            entries = assert_is_zip(dest)
+            return {
+                "path": dest,
+                "done": True,
+                "skipped": True,
+                "entries": len(entries),
+                "bytes": dest.stat().st_size,
+            }
+        except SecAccessError:
+            dest.unlink()
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    part = dest.with_name(dest.name + ".part")
+    have = part.stat().st_size if part.is_file() else 0
+    resp = client.get(
+        BULK_URLS[kind],
+        headers={"Range": f"bytes={have}-"} if have else None,
+        ok=(200, 206),
+    )
+    if have and resp.status_code != 206:
+        have = 0  # Range를 무시했다. 이어붙이면 깨진다
+    total = resp.headers.get("Content-Range", "").rsplit("/", 1)[-1]
+    total = int(total) if total.isdigit() else int(resp.headers.get("Content-Length", 0)) + have
+
+    started = time.monotonic()
+    out_of_time = False
+    with part.open("ab" if have else "wb") as fh:
+        for chunk in resp.iter_content(chunk_size=1 << 20):
+            fh.write(chunk)
+            have += len(chunk)
+            if budget_seconds is not None and time.monotonic() - started > budget_seconds:
+                out_of_time = True
+                break
+    resp.close()
+    if out_of_time and have < total:
+        return {"path": part, "done": False, "skipped": False, "bytes": have, "total": total}
+
+    part.replace(dest)
+    entries = assert_is_zip(dest)
+    return {
+        "path": dest,
+        "done": True,
+        "skipped": False,
+        "entries": len(entries),
+        "bytes": dest.stat().st_size,
+    }
