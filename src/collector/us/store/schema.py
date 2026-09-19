@@ -438,6 +438,26 @@ INDEX_CONSTITUENTS_ARROW = pyar.schema(
 )
 
 
+# --- short_volume (03 §4.16, 04 C7) ------------------------------------------
+# FINRA regsho daily. **off-exchange 공개 거래만이다 — 전체 시장이 아니다.**
+# 분모를 시장 전체(prices_daily.volume)로 잡으면 비율이 틀린다.
+#
+# 거래량이 정수가 아니다. 최신 파일은 12,224행 중 7,801행에 소수점이 있다
+# (연구 §2.3). int64로 받으면 거기서 깨진다.
+
+SHORT_VOLUME_ARROW = pyar.schema(
+    [
+        ("date", pyar.date32()),
+        ("symbol", pyar.string()),  # FINRA는 class를 BF.A 로 쓴다. 나스닥 규약과 다르다
+        ("short_volume", pyar.float64()),
+        ("short_exempt_volume", pyar.float64()),  # 2018 이전 파일에 없다 → null
+        ("total_volume", pyar.float64()),
+        ("market", pyar.string()),  # venue 목록이다 ("B,Q,N"). 단일 코드가 아니다
+        ("observed_at", pyar.timestamp("us", tz="UTC")),
+    ]
+)
+
+
 ARROW_SCHEMAS: dict[str, pyar.Schema] = {
     "prices_daily": PRICES_DAILY_ARROW,
     "corp_actions": CORP_ACTIONS_ARROW,
@@ -455,6 +475,7 @@ ARROW_SCHEMAS: dict[str, pyar.Schema] = {
     "trading_calendar": TRADING_CALENDAR_ARROW,
     "macro_series": MACRO_SERIES_ARROW,
     "index_constituents": INDEX_CONSTITUENTS_ARROW,
+    "short_volume": SHORT_VOLUME_ARROW,
 }
 
 FRAME_SCHEMAS: dict[str, pa.DataFrameSchema] = {
