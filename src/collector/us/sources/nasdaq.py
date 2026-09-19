@@ -198,3 +198,135 @@ def scan_earnings_sample(
         writer.writeheader()
         writer.writerows(rows)
     return {"path": dest, "dates": len(rows), "rows": rows}
+
+
+#: ``Dec/2023`` 꼴 회계분기. 2,065일 표본에서 예외가 없었다.
+_MONTHS = {
+    "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
+    "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12,
+}
+
+
+def parse_money(text: str | None) -> float | None:
+    """``$2.18`` → 2.18, ``($0.02)`` → −0.02, ``N/A`` → None.
+
+    **괄호가 음수다.** 회계 표기라 빼먹으면 적자 종목의 EPS 부호가 뒤집힌다.
+    """
+    raw = (text or "").strip()
+    if not raw or raw.upper() in ("N/A", "NA", "-", "--"):
+        return None
+    negative = raw.startswith("(") and raw.endswith(")")
+    cleaned = raw.strip("()").replace("$", "").replace(",", "").replace("%", "").strip()
+    if not cleaned:
+        return None
+    try:
+        value = float(cleaned)
+    except ValueError:
+        return None
+    return -value if negative else value
+
+
+def parse_fiscal_quarter(text: str | None) -> dt.date | None:
+    """``Dec/2023`` → 2023-12-31. 그 달의 **마지막 날**로 둔다."""
+    raw = (text or "").strip()
+    if "/" not in raw:
+        return None
+    mon, _, year = raw.partition("/")
+    month = _MONTHS.get(mon[:3].title())
+    if month is None or not year.isdigit():
+        return None
+    y = int(year)
+    return dt.date(y + (month == 12), (month % 12) + 1, 1) - dt.timedelta(days=1)
+
+
+def load_earnings_calendar(
+    root: DataRoot,
+    *,
+    snapshot_date: dt.date | str,
+    observed_at: dt.datetime | None = None,
+) -> dict[str, object]:
+    """``raw/nasdaq/earnings_calendar/``의 JSON들을 ``earnings_calendar`` 한 장으로.
+
+    **`marketCap`은 안 담는다** — 과거 행에도 오늘 값이 들어 있다 (01 §2.3).
+    """
+    import pyarrow as pyar
+
+    from collector.us.store.writer import snapshot_path, verify_snapshot, write_snapshot_arrow
+
+    observed_at = observed_at or dt.datetime.now(dt.UTC)
+    src_dir = root.raw / "nasdaq" / "earnings_calendar"
+    files = sorted(src_dir.glob("date=*.json"))
+    if not files:
+        raise NasdaqError(f"{src_dir}에 받아 둔 JSON이 없다. 먼저 받는다.")
+
+    cols: dict[str, list] = {
+        k: []
+        for k in ("date", "symbol", "name", "eps", "eps_forecast", "surprise_pct",
+                  "n_estimates", "fiscal_quarter_ending", "fiscal_period_end", "time_code")
+    }
+    seen: set[tuple[dt.date, str]] = set()
+    duplicate_rows = empty_days = asof_mismatch = 0
+
+    for path in files:
+        day = dt.date.fromisoformat(path.stem.split("=", 1)[1])
+        doc = json.loads(path.read_text())
+        data = doc.get("data") or {}
+        rows = data.get("rows") or []
+        if not rows:
+            empty_days += 1
+            continue
+        # asOf 는 사람이 읽는 꼴("Thu, Feb 1, 2024")이라 날짜로 다시 파싱하지 않고
+        # 연·일만 본다. 다른 날짜가 오면 요청이 조용히 무시된 것이다 (06 §1)
+        as_of = (data.get("asOf") or "")
+        if as_of and (str(day.year) not in as_of or f" {day.day}," not in as_of):
+            asof_mismatch += 1
+        for row in rows:
+            symbol = (row.get("symbol") or "").strip()
+            if not symbol or (day, symbol) in seen:
+                duplicate_rows += 1 if symbol else 0
+                continue
+            seen.add((day, symbol))
+            cols["date"].append(day)
+            cols["symbol"].append(symbol)
+            cols["name"].append((row.get("name") or "").strip() or None)
+            cols["eps"].append(parse_money(row.get("eps")))
+            cols["eps_forecast"].append(parse_money(row.get("epsForecast")))
+            cols["surprise_pct"].append(parse_money(row.get("surprise")))
+            n_est = (row.get("noOfEsts") or "").strip()
+            cols["n_estimates"].append(int(n_est) if n_est.isdigit() else None)
+            fq = (row.get("fiscalQuarterEnding") or "").strip() or None
+            cols["fiscal_quarter_ending"].append(fq)
+            cols["fiscal_period_end"].append(parse_fiscal_quarter(fq))
+            cols["time_code"].append((row.get("time") or "").strip() or None)
+
+    n = len(cols["symbol"])
+    table = pyar.table(
+        {
+            "date": pyar.array(cols["date"], type=pyar.date32()),
+            "symbol": pyar.array(cols["symbol"], type=pyar.string()),
+            "name": pyar.array(cols["name"], type=pyar.string()),
+            "eps": pyar.array(cols["eps"], type=pyar.float64()),
+            "eps_forecast": pyar.array(cols["eps_forecast"], type=pyar.float64()),
+            "surprise_pct": pyar.array(cols["surprise_pct"], type=pyar.float64()),
+            "n_estimates": pyar.array(cols["n_estimates"], type=pyar.int32()),
+            "fiscal_quarter_ending": pyar.array(
+                cols["fiscal_quarter_ending"], type=pyar.string()
+            ),
+            "fiscal_period_end": pyar.array(cols["fiscal_period_end"], type=pyar.date32()),
+            "time_code": pyar.array(cols["time_code"], type=pyar.string()),
+            "observed_at": pyar.array(
+                [observed_at] * n, type=pyar.timestamp("us", tz="UTC")
+            ),
+        }
+    )
+    dest = snapshot_path(root, "earnings_calendar", snapshot_date)
+    write_snapshot_arrow(table, "earnings_calendar", dest, unique_on=("date", "symbol"))
+    stats = verify_snapshot(dest, "earnings_calendar", unique_on=("date", "symbol"))
+    return {
+        "path": dest,
+        "files": len(files),
+        "empty_days": empty_days,
+        "duplicate_rows": duplicate_rows,
+        "asof_mismatch": asof_mismatch,
+        **stats,
+    }

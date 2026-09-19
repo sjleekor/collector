@@ -133,3 +133,72 @@ def test_scan_writes_a_csv(tmp_path):
     assert r["dates"] == 2
     assert text.splitlines()[0].startswith("date,as_of,rows,symbols,n_eps")
     assert "2024-05-02" in text
+
+
+# --- 값 파싱 -----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("$2.18", 2.18),
+        ("($0.02)", -0.02),  # 괄호가 음수다. 빼먹으면 적자 종목 부호가 뒤집힌다
+        ("-$0.15", -0.15),
+        ("4.31", 4.31),
+        ("N/A", None),
+        ("", None),
+        (None, None),
+        ("$1,234.50", 1234.5),
+    ],
+)
+def test_parse_money(text, expected):
+    assert nasdaq.parse_money(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("Dec/2023", dt.date(2023, 12, 31)),
+        ("Feb/2020", dt.date(2020, 2, 29)),  # 윤년
+        ("Jun/2024", dt.date(2024, 6, 30)),
+        ("", None),
+        ("Xyz/2024", None),
+    ],
+)
+def test_parse_fiscal_quarter(text, expected):
+    assert nasdaq.parse_fiscal_quarter(text) == expected
+
+
+def test_load_earnings_calendar_drops_market_cap(tmp_path):
+    """`marketCap`은 과거 행에도 오늘 값이 들어 있다 (01 §2.3). 담지 않는다."""
+    import duckdb
+
+    root = _lake(tmp_path)
+    for day, rows in (
+        ("2024-02-01", _ROWS["data"]["rows"]),
+        ("2024-02-02", []),  # 실적이 하나도 없는 날이 있다 (연말·독립기념일 앞뒤)
+    ):
+        p = nasdaq.earnings_path(root, day)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"data": {"asOf": f"Thu, Feb {day[-1]}, 2024", "rows": rows}}))
+
+    r = nasdaq.load_earnings_calendar(root, snapshot_date="2026-09-19")
+    assert r["rows"] == 2 and r["empty_days"] == 1 and r["asof_mismatch"] == 0
+    con = duckdb.connect()
+    assert "marketCap" not in con.execute(f"SELECT * FROM '{r['path']}' LIMIT 0").df().columns
+    got = con.execute(
+        f"SELECT symbol, eps, eps_forecast, surprise_pct, n_estimates FROM '{r['path']}'"
+        " ORDER BY symbol"
+    ).fetchall()
+    assert got[0] == ("AAPL", 2.18, 2.09, 4.31, 11)
+    assert got[1] == ("ZZZ", 0.10, None, None, None)
+
+
+def test_load_earnings_calendar_counts_asof_mismatch(tmp_path):
+    """`date=`를 조용히 무시하는 엔드포인트가 같은 서버에 있다 (06 §1)."""
+    root = _lake(tmp_path)
+    p = nasdaq.earnings_path(root, "2024-02-01")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"data": {"asOf": "Fri, Mar 8, 2024", "rows": _ROWS["data"]["rows"]}}))
+    r = nasdaq.load_earnings_calendar(root, snapshot_date="2026-09-19")
+    assert r["asof_mismatch"] == 1

@@ -458,6 +458,31 @@ SHORT_VOLUME_ARROW = pyar.schema(
 )
 
 
+# --- earnings_calendar (03 §4.17, 04 C7) -------------------------------------
+# Nasdaq 실적 캘린더. **`marketCap`은 안 담는다** — 과거 행에도 오늘 값이
+# 들어 있다 (01 §2.3). 컬럼 단위로 as-of를 봐야 하는 원천이다.
+#
+# `time_code`가 과거 구간에서는 전부 `time-not-supplied`라 **장전·장후를 못
+# 가른다.** 발표 시각이 필요하면 `filings_index`의 8-K 2.02 `acceptance_datetime`
+# 을 쓴다 (03 §4.11).
+
+EARNINGS_CALENDAR_ARROW = pyar.schema(
+    [
+        ("date", pyar.date32()),  # 캘린더 날짜. 응답의 asOf와 같아야 한다
+        ("symbol", pyar.string()),
+        ("name", pyar.string()),
+        ("eps", pyar.float64()),  # 괄호가 음수다 — ($0.02)는 -0.02
+        ("eps_forecast", pyar.float64()),
+        ("surprise_pct", pyar.float64()),
+        ("n_estimates", pyar.int32()),
+        ("fiscal_quarter_ending", pyar.string()),  # Dec/2023
+        ("fiscal_period_end", pyar.date32()),  # 그 달 말일로 푼 것
+        ("time_code", pyar.string()),
+        ("observed_at", pyar.timestamp("us", tz="UTC")),
+    ]
+)
+
+
 ARROW_SCHEMAS: dict[str, pyar.Schema] = {
     "prices_daily": PRICES_DAILY_ARROW,
     "corp_actions": CORP_ACTIONS_ARROW,
@@ -476,6 +501,7 @@ ARROW_SCHEMAS: dict[str, pyar.Schema] = {
     "macro_series": MACRO_SERIES_ARROW,
     "index_constituents": INDEX_CONSTITUENTS_ARROW,
     "short_volume": SHORT_VOLUME_ARROW,
+    "earnings_calendar": EARNINGS_CALENDAR_ARROW,
 }
 
 FRAME_SCHEMAS: dict[str, pa.DataFrameSchema] = {
