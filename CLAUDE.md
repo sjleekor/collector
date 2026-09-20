@@ -9,13 +9,19 @@
 
 ## 현재 상태
 
-**한국 시장 수집 코드가 들어와 있다 (2026-09-14, KR 분리 완료).** 버전 `0.14.1`.
-prod(sj2-server)가 `ghcr.io/sjleekor/collector:v0.14.1`로 정기 수집을 돌리는 중이다.
+**한국·미국 수집 코드가 다 들어와 있다.** 버전 `0.15.0`.
+prod(sj2-server)가 `ghcr.io/sjleekor/collector:v0.15.0`으로 **두 시장 모두** 정기 수집을 돌린다.
+
+| | 언제 | Cronicle |
+|---|---|---|
+| 한국 | 2026-09-14 (KR 분리) | 이벤트 18개 · 18:30\~23:30 등 |
+| **미국** | **2026-09-20 (C0\~C8)** | **`sdc_daily_us` · 매일 15:00 KST** |
 
 ```
 src/collector/
-├── cli/app.py     진입점 — `uv run collector`
-├── us/            미국 시장 — 뼈대만, 수집 로직은 아직 없다
+├── cli/app.py     진입점 — `uv run collector`. kr 파서에 us-* 를 얹는다
+├── lake.py        stock_data/<시장>/ 경로 계약 (kr·us 공용, modeler 도 쓴다)
+├── us/            미국 시장 — sources/ ops/ store/ universe/ validate/ cli/
 └── kr/            한국 시장 — 옛 stock_data_collector/krx_collector에서 옮겨옴
     ├── adapters/  원천별 어댑터 (KRX·DART·KIS 등)
     ├── domain/    도메인 타입
@@ -38,9 +44,10 @@ uv run collector --help
 
 설정은 [`../CLAUDE.md`](../CLAUDE.md)의 공통 툴체인을 따른다. **프로젝트마다 다르게 잡지 않는다.**
 
-미국 시장 조사는 끝나 있다. 무엇을 어디서 어떻게 받을지는
-[`../my/milestones/us/research/`](../my/milestones/us/research/README.md)에 정리돼 있고,
-수집 설계는 [`90_collection_design.md`](../my/milestones/us/research/data/web_scraping/90_collection_design.md)에 있다.
+미국 수집 계획과 실행 결과는
+[`../my/milestones/us/plan/20260912_collect/00_candidate_plan/`](../my/milestones/us/plan/20260912_collect/00_candidate_plan/README.md)에 있다.
+**표 18장의 계약과 실측은 `03_schema_and_pit.md` §4**, **단계별 결과는 `04_collection_steps.md` §2**다.
+조사는 [`../my/milestones/us/research/`](../my/milestones/us/research/README.md)다.
 
 **저장소는 `sjleekor/collector`다.** 한국과 미국 수집 코드가 모두 여기 들어간다.
 그래서 이름에 시장이 없다.
@@ -60,7 +67,7 @@ uv run collector --help
 | **원시값과 이벤트만 저장한다** | 조정된 값을 저장하면 PIT가 깨진다. 조정은 읽을 때 계산한다 |
 | **받은 날짜를 같이 남긴다** | 원천이 과거를 고친다. `observed_at` 없이는 되돌릴 수 없다 |
 | **HTTP 200을 성공으로 보지 않는다** | 원천마다 성공 판정기가 다르다. 본문을 봐야 한다 |
-| **천천히 받는다** | 기본 요청 간격 5초. 날짜당 1요청 경로를 종목당 1요청보다 우선한다 |
+| **천천히 받는다** | 기본 요청 간격 5초. 날짜당 1요청 경로를 종목당 1요청보다 우선한다. **원천별로 낮춘 값은 코드에 근거와 같이 적는다** (SEC는 5초 그대로, FINRA·Wikipedia·FRED 1초, Nasdaq 1.5초) |
 | **인증 값은 환경변수로만 넘긴다** | URL·로그·문서·커밋에 값을 남기지 않는다 (`direnv exec` 사용) |
 | **재수집이 안 되는 데이터는 즉시 parquet으로 남긴다** | 원천이 막히면 다시 못 받는다 |
 
@@ -81,7 +88,14 @@ uv run collector --help
 
 ---
 
-## 아직 정해지지 않은 것
+## 미국 쪽에서 알아 둘 것 (2026-09-20)
 
-- 미국 시장 수집 로직 자체 (지금은 뼈대만)
-- 데이터는 `../stock_data/<시장>/`에 있다 — `us/raw/`, `kr/raw/`. **경로를 코드에 박지 않고 환경변수로 받는다**
+| | |
+|---|---|
+| **명령** | `us-daily run`(하루치) · `us-load <table>` · `us-calendar build` · `us-universe rebuild` · `us-prune` |
+| **한 줄로 돈다** | 할 일을 일정이 아니라 **`raw/`에 무엇이 있나**로 만든다. backfill과 상시 운영이 같은 함수를 쓴다 |
+| **`dolt`가 이미지에 있다** | 2.3.5. 미국 가격·IV/HV 원천이다. 없으면 `us-daily`가 첫 원천에서 멈춘다 |
+| **레이크 정본은 서버다** | `/home/whi/data/stock_data/us`. 맥은 `deploy/local/us-mirror.sh`로 당겨 읽는다 |
+| **태그를 밀면 두 시장이 같이 나간다** | `v0.15.0`부터 미국 코드가 prod 이미지에 들어 있다. 태그 전에 `env -i ... collector --help`를 본다 |
+
+**남은 것은 `modeler/`에 미국이 들어오는 일이다.** 지금 `modeler/`는 한국만 안다.

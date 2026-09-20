@@ -2,12 +2,14 @@
 
 이 디렉터리는 `sj2-server:/home/whi/apps/sdc`에 배포되는 SDC 운영 파일의 source of truth다.
 
-- 마지막 확인: 2026-08-28 KST
+- 마지막 확인: **2026-09-20 KST** (미국 이전 · D18)
 - 확인한 원천: Cronicle API `GET /api/app/get_schedule/v1`, `GET /api/app/get_event/v1`, 원격 파일 `whi@sj2-server:/home/whi/apps/sdc/{compose.yaml,bin/}`
 - Cronicle UI: `http://sj2-server:3012/#Schedule`
 - 배포 경로: `whi@sj2-server:/home/whi/apps/sdc`
-- 현재 compose image: `ghcr.io/sjleekor/sdc:v0.11.4`
+- 현재 compose image: **`ghcr.io/sjleekor/collector:v0.15.0`** (2026-09-20 기준 원격과 이 저장소가 같다)
 - 현재 상시 기동 서비스: `db`만 기동. `collector`는 Cronicle wrapper가 `docker compose run --rm collector ...`로 작업마다 실행한다.
+- **2026-09-20부터 미국 수집도 여기서 돈다** (미국 계획 D18). 이벤트 `sdc_daily_us`, 래퍼 `bin/us-daily.sh`, 볼륨 `/home/whi/data/stock_data:/stock_data`.
+  이미지에 **`dolt` 2.3.5**가 들어갔다 (1.32GB → 1.43GB) — 미국 가격·IV/HV 원천이다.
 
 원격 `compose.yaml`과 `bin/*.sh` checksum은 현재 로컬 `deploy/prod`와 일치한다.
 
@@ -113,6 +115,7 @@ flowchart TD
 | `sdc_daily_opendart_financials` | chain-only | `sdc_daily_opendart_share_info` | `dart-sync-financials.sh` | OpenDART 재무제표를 증분 동기화한다. 기본 lookback은 1년, attempt guard는 10,000건이다. |
 | `sdc_daily_opendart_share_info` | chain-only | `sdc_daily_opendart_xbrl` | `dart-sync-share-info.sh` | 주식수, 배당, 자기주식 관련 OpenDART 데이터를 증분 동기화한다. Cronicle script에 `DART_SHARE_INFO_MAX_ATTEMPT_TARGETS=35000` override가 있다. |
 | `sdc_daily_opendart_xbrl` | chain-only | 없음 | `dart-sync-xbrl.sh` | OpenDART XBRL 데이터를 증분 동기화한다. 기본 attempt guard는 10,000건이다. |
+| **`sdc_daily_us`** | **daily 15:00** | 없음 | **`us-daily.sh`** | **미국 raw를 하루치 받는다** (미국 계획 C8). 원천 일곱(dolt·Nasdaq 실적·FINRA regsho·FINRA 잔고·SEC 벌크·SEC 분기·FRED/Wikipedia)을 한 명령이 순서대로 본다. **평일이 아니라 매일이다** — 할 일을 일정이 아니라 `raw/`에 무엇이 있나로 만들어서 주말 실행이 거의 공짜고, 주 1회짜리 SEC 벌크 3GB에 조용한 슬롯을 준다. `catch_up=0`인 이유도 같다: 잡 자체가 마지막으로 받은 것부터 어제까지 메꾼다. |
 
 ## Wrapper와 lock/throttle
 
@@ -138,6 +141,7 @@ source lock은 `/tmp/sdc-locks/<domain>.lock`에 `flock`을 걸고, lock 획득 
 | `ecos` | `common-sync-ecos-daily.sh`, `common-sync-ecos-macro.sh` | 10s |
 | `krx_marketdata` | `prices-backfill-incremental.sh`, `flows-sync.sh`, `common-sync-krx.sh`, `common-sync-pykrx.sh` | 60s |
 | `opendart` | OpenDART sync wrappers, OpenDART backfill | 5s |
+| **`us`** | **`us-daily.sh`** | **0s** — 원천별 간격은 각 클라이언트 안에 있다 (SEC 5s · FINRA·Wikipedia·FRED 1s · Nasdaq 1.5s) |
 
 ### KRX 요청 페이스 (2026-08-16 정정)
 
