@@ -10,6 +10,7 @@ PostgreSQL을 당기는 자리에, 미국은 parquet이라 `rsync`가 온다.
 deploy/local/us-mirror.sh            # 서버 → 맥, derived 만 (기본)
 deploy/local/us-mirror.sh --all      # raw 까지 (dolt clone 14GB 포함)
 deploy/local/us-mirror.sh --dry-run
+deploy/local/us-mirror.sh --all --progress   # 20GB 받을 때만 진행률을 켠다
 ```
 
 | | 서버 (`sj2-server`) | 맥 |

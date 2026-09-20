@@ -13,14 +13,16 @@ REMOTE_DIR="${SDC_US_REMOTE_DIR:-/home/whi/data/stock_data/us}"
 LOCAL_DIR="${STOCK_DATA_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../stock_data" && pwd)}/us"
 
 paths=(derived/ datasets/ output/)
-rsync_opts=(-a --delete --info=progress2 --human-readable)
+# 기본은 요약만. 바뀐 것이 없을 때 progress2 를 켜 두면 화면이 한 줄로 도배된다
+rsync_opts=(-a --delete --info=stats1 --human-readable)
 
 for arg in "$@"; do
   case "$arg" in
-    --all)     paths=(derived/ datasets/ output/ raw/) ;;
-    --raw)     paths=(raw/) ;;
-    --dry-run) rsync_opts+=(--dry-run) ;;
-    *) printf 'usage: %s [--all|--raw] [--dry-run]\n' "$0" >&2; exit 2 ;;
+    --all)      paths=(derived/ datasets/ output/ raw/) ;;
+    --raw)      paths=(raw/) ;;
+    --dry-run)  rsync_opts+=(--dry-run) ;;
+    --progress) rsync_opts+=(--info=progress2) ;;
+    *) printf 'usage: %s [--all|--raw] [--dry-run] [--progress]\n' "$0" >&2; exit 2 ;;
   esac
 done
 
