@@ -6,23 +6,30 @@
 #
 # 기본은 derived/ 만 당긴다. modeler 가 읽는 것이 스냅샷이고, raw/ 22GB 중
 # 14GB 가 dolt clone 이라 맥에서 쓸 일이 없다.
+#
+# datasets/ 는 어느 플래그에서도 당기지 않는다. 조립한 패널·라벨은 modeler 가
+# 맥에서 만드는 것이고 서버에는 없다. 당겼다가는 --delete 가 그걸 지운다.
+#
+# output/ 도 통째로는 안 당긴다. 그 아래 feature_scan/ 과 model_runs/ 는 modeler
+# 것이고 서버에 있는 것은 수집 QA 인 scan/ 뿐이다. --output 은 scan/ 만 당긴다.
 set -euo pipefail
 
 REMOTE="${SDC_REMOTE_HOST:-whi@sj2-server}"
 REMOTE_DIR="${SDC_US_REMOTE_DIR:-/home/whi/data/stock_data/us}"
 LOCAL_DIR="${STOCK_DATA_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../stock_data" && pwd)}/us"
 
-paths=(derived/ datasets/ output/)
+paths=(derived/)
 # 기본은 요약만. 바뀐 것이 없을 때 progress2 를 켜 두면 화면이 한 줄로 도배된다
 rsync_opts=(-a --delete --info=stats1 --human-readable)
 
 for arg in "$@"; do
   case "$arg" in
-    --all)      paths=(derived/ datasets/ output/ raw/) ;;
+    --output)   paths=(derived/ output/scan/) ;;
+    --all)      paths=(derived/ output/scan/ raw/) ;;
     --raw)      paths=(raw/) ;;
     --dry-run)  rsync_opts+=(--dry-run) ;;
     --progress) rsync_opts+=(--info=progress2) ;;
-    *) printf 'usage: %s [--all|--raw] [--dry-run] [--progress]\n' "$0" >&2; exit 2 ;;
+    *) printf 'usage: %s [--all|--raw|--output] [--dry-run] [--progress]\n' "$0" >&2; exit 2 ;;
   esac
 done
 
