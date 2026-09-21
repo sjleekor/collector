@@ -244,3 +244,88 @@ def test_resolve_inputs_says_which_table_is_missing(tmp_path):
     _fake_snapshots(root, spec)
     with pytest.raises(FileNotFoundError, match="filings_sub"):
         build.resolve_inputs(root)
+
+
+# --- 달 M 은 달 M-1 로 판정한다 (2026-09-22) ---------------------------------
+
+
+def test_shift_months_walks_across_year_boundaries():
+    assert build._shift_months(dt.date(2019, 1, 1), -1) == dt.date(2018, 12, 1)
+    assert build._shift_months(dt.date(2018, 9, 1), -1) == dt.date(2018, 8, 1)
+    assert build._shift_months(dt.date(2018, 12, 1), 1) == dt.date(2019, 1, 1)
+
+
+def test_judge_lag_is_one_month():
+    """**0 으로 되돌리면 룩어헤드가 돌아온다.**
+
+    패널은 그 달 첫 거래일을 리밸런스일로 쓴다. 달 M 자신의 중앙값으로
+    멤버십을 정하면 9월 1일에 9월 한 달의 유동성을 아는 셈이 된다 —
+    멤버십의 8.72% 가 여기서 갈렸다 (2차 후속 `06_universe_lookahead.md`).
+    """
+    assert build.JUDGE_LAG_MONTHS == 1
+
+
+def test_warmup_covers_the_month_that_judges_the_first_month():
+    """첫 달의 근거가 되는 달이 **완전히 예열돼** 있어야 한다.
+
+    20거래일 롤링은 약 28달력일이 필요하다. 판정 지연이 한 달이므로
+    예열은 최소 `한 달 + 롤링` 이어야 한다.
+    """
+    assert build.WARMUP_DAYS >= 31 * build.JUDGE_LAG_MONTHS + 28
+
+
+def _chain(monthly_by_ym, target_months):
+    """``build_universe_daily`` 의 이어달리기와 같은 규칙 — 지연까지 포함해서."""
+    prev, out, unjudged = set(), {}, []
+    for ym in target_months:
+        rows = monthly_by_ym.get(build._shift_months(ym, -build.JUDGE_LAG_MONTHS))
+        if not rows:
+            unjudged.append(ym)
+            prev = set()
+            continue
+        keep = set()
+        for symbol, adv, traded in rows:
+            if adv is None or traded < build.MIN_TRADED_DAYS_20:
+                continue
+            threshold = build.MAINTAIN_ADV_USD if symbol in prev else build.ENTRY_ADV_USD
+            if adv >= threshold:
+                keep.add(symbol)
+        out[ym] = keep
+        prev = keep
+    return out, unjudged
+
+
+def test_membership_follows_the_previous_month_not_the_current_one():
+    """8월에 말라 있던 종목은 **9월에 터져도** 9월 유니버스에 못 들어온다."""
+    big, small = build.ENTRY_ADV_USD * 3, build.ENTRY_ADV_USD / 10
+    monthly = {
+        dt.date(2018, 8, 1): [("SPIKE", small, 20), ("STEADY", big, 20)],
+        dt.date(2018, 9, 1): [("SPIKE", big, 20), ("STEADY", big, 20)],
+    }
+    out, unjudged = _chain(monthly, [dt.date(2018, 9, 1), dt.date(2018, 10, 1)])
+    assert unjudged == []
+    assert out[dt.date(2018, 9, 1)] == {"STEADY"}  # 9월의 급등을 9월에 안 쓴다
+    assert out[dt.date(2018, 10, 1)] == {"SPIKE", "STEADY"}  # 한 달 늦게 들어온다
+
+
+def test_a_month_without_a_prior_month_is_reported_not_silently_empty():
+    """근거가 없으면 **빈 달로 조용히 두지 않고** 결과에 적는다."""
+    monthly = {dt.date(2018, 9, 1): [("A", build.ENTRY_ADV_USD * 2, 20)]}
+    out, unjudged = _chain(monthly, [dt.date(2018, 9, 1), dt.date(2018, 10, 1)])
+    assert unjudged == [dt.date(2018, 9, 1)]
+    assert out == {dt.date(2018, 10, 1): {"A"}}
+
+
+def test_hysteresis_still_chains_across_the_lag():
+    """유지 문턱은 **직전 달의 멤버십**을 본다 — 지연을 넣어도 그대로다."""
+    mid = (build.ENTRY_ADV_USD + build.MAINTAIN_ADV_USD) / 2
+    monthly = {
+        dt.date(2018, 8, 1): [("M", build.ENTRY_ADV_USD * 2, 20)],
+        dt.date(2018, 9, 1): [("M", mid, 20)],  # 진입엔 모자라고 유지엔 넉넉하다
+        dt.date(2018, 10, 1): [("M", build.MAINTAIN_ADV_USD / 2, 20)],
+    }
+    months = [dt.date(2018, 9, 1), dt.date(2018, 10, 1), dt.date(2018, 11, 1)]
+    out, _ = _chain(monthly, months)
+    assert out[months[0]] == {"M"}  # 8월이 진입 문턱을 넘었다
+    assert out[months[1]] == {"M"}  # 9월은 유지 문턱만 넘으면 된다
+    assert out[months[2]] == set()  # 10월엔 유지 문턱도 못 넘는다

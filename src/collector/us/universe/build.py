@@ -60,7 +60,22 @@ def _name_exclusion_sql(column: str, symbol_column: str = "b.symbol") -> str:
 
 #: 20거래일 롤링을 예열하는 데 쓰는 달력일. 구간 첫날부터 바로 재면
 #: adv_20d 가 하루치로 계산돼 유니버스가 통째로 빈다.
-WARMUP_DAYS = 60
+#:
+#: **60 에서 90 으로 늘렸다** (2026-09-22). 이제 달 M 의 판정에 달 M-1 을
+#: 쓰므로(:data:`JUDGE_LAG_MONTHS`), 첫 달(2018-09)의 근거가 되는 2018-08 이
+#: **완전히 예열돼 있어야** 한다. 60일이면 8월 초 며칠이 덜 찬 채로 들어간다.
+WARMUP_DAYS = 90
+
+#: **달 M 의 멤버십을 달 M-1 의 통계로 정한다** (2026-09-22).
+#:
+#: 원래는 달 M 자신의 중앙값으로 정했다. 그런데 패널은 그 달 **첫 거래일**을
+#: 리밸런스일로 쓰므로, 9월 1일에 서는 포트폴리오가 9월 한 달의 유동성을
+#: 이미 아는 셈이었다 — 룩어헤드다. 멤버십의 **8.72%** 가 여기서 갈렸다
+#: (미국 2차 후속 ``06_universe_lookahead.md``).
+#:
+#: **안정성은 안 잃는다.** 한 날짜가 아니라 한 달 중앙값을 쓰는 것은 그대로다
+#: (04 §2.11). 보는 달만 하나 앞으로 민다.
+JUDGE_LAG_MONTHS = 1
 
 
 def daily_base_sql(*, prices: str = "prices_daily", warmup_start: str, end: str) -> str:
@@ -127,7 +142,11 @@ def monthly_candidates_sql(*, base: str = "daily_base", listing: str = "listing_
     **그 달의 중앙값 ``adv_20d``로 잰다. 첫 거래일 값 하나로 재지 않는다.**
     한 날짜에 기대면 §5.3이 피하려던 것(하루짜리 거래량 급증에 유니버스가
     흔들리는 것)이 월 단위로 되돌아온다 — 문턱 근처 종목이 매달 들락거린다.
-    상장 상태는 그 달 첫 거래일 기준이다.
+
+    **여기는 "달 ym 에 무슨 일이 있었나"만 낸다.** 그 통계를 **어느 달의**
+    멤버십에 쓸지는 :func:`build_universe_daily` 가 정한다 — 달 M 의 멤버십은
+    달 M-1 의 행을 본다 (:data:`JUDGE_LAG_MONTHS`). 그래서 이 함수의
+    ``judge_date`` 는 통계를 낸 달의 첫 거래일이지 판정 대상 달이 아니다.
 
     ``in_universe``를 여기서 정하지는 않는다 — 진입·유지 문턱이 달라서
     직전 달 결과가 필요하다. 그 이어달리기는 :func:`build_universe_daily`가 한다.
@@ -182,6 +201,12 @@ INPUT_TABLES: tuple[str, ...] = (
     "filings_sub",
     "midas_security_daily",
 )
+
+def _shift_months(ym: _dt.date, months: int) -> _dt.date:
+    """달의 첫날을 ``months`` 만큼 민다. ``_shift_months(2019-01-01, -1) == 2018-12-01``."""
+    total = ym.year * 12 + (ym.month - 1) + months
+    return _dt.date(total // 12, total % 12 + 1, 1)
+
 
 def resolve_inputs(root) -> dict[str, Path]:
     """``INPUT_TABLES`` 마다 **가장 최근 스냅샷** 경로.
@@ -313,19 +338,28 @@ def build_universe_daily(
     # 있었다 (2026-09-19 확인). 거래소 캘린더로 거른다.
     import exchange_calendars as _xcals
 
-    sessions = [
-        d.date().isoformat() for d in _xcals.get_calendar("XNYS").sessions_in_range(start, end)
-    ]
+    _cal = _xcals.get_calendar("XNYS")
+    sessions = [d.date().isoformat() for d in _cal.sessions_in_range(start, end)]
+    # 예열 구간의 세션도 필요하다 — 판정 바닥이 거기까지 간다.
+    sessions_all = [d.date().isoformat() for d in _cal.sessions_in_range(warmup_start, end)]
     con.execute("CREATE TABLE xnys_sessions (date DATE)")
     con.executemany("INSERT INTO xnys_sessions VALUES (?)", [(d,) for d in sessions])
+    con.execute("CREATE TABLE xnys_sessions_all (date DATE)")
+    con.executemany("INSERT INTO xnys_sessions_all VALUES (?)", [(d,) for d in sessions_all])
     con.execute("CREATE VIEW trading_days AS SELECT date FROM xnys_sessions")
     # 예열 구간까지 읽어 롤링을 채운 뒤, 검정 구간만 남긴다.
     con.execute(
         "CREATE TABLE daily_base_warm AS " + daily_base_sql(warmup_start=warmup_start, end=end)
     )
+    # **판정에 쓰는 바닥은 예열 구간까지 포함한다.** 달 M 의 멤버십이 M-1 을
+    # 보므로, 첫 달(2018-09)의 근거가 될 2018-08 이 여기 있어야 한다.
+    # 세션 필터는 둘 다 건다 — 원천에 비정규장 데이터가 섞여 있다.
     con.execute(
-        f"CREATE TABLE daily_base AS SELECT w.* FROM daily_base_warm w "
-        f"JOIN xnys_sessions s ON s.date = w.date WHERE w.date >= DATE '{start}'"
+        "CREATE TABLE daily_base_judge AS SELECT w.* FROM daily_base_warm w "
+        "JOIN xnys_sessions_all s ON s.date = w.date"
+    )
+    con.execute(
+        f"CREATE TABLE daily_base AS SELECT * FROM daily_base_judge WHERE date >= DATE '{start}'"
     )
     dropped = con.execute(
         f"SELECT count(DISTINCT date) FROM daily_base_warm w "
@@ -353,26 +387,44 @@ def build_universe_daily(
                COALESCE(l.test_issue, sc.test_issue)   AS test_issue,
                (l.is_etf IS NULL AND sc.is_etf IS NOT NULL) AS flags_from_current,
                l.financial_status
-        FROM daily_base b
+        FROM daily_base_judge b
         ASOF LEFT JOIN listing_flat l
           ON b.symbol = l.symbol AND b.date >= l.as_of
         LEFT JOIN symbol_current sc ON sc.symbol = b.symbol
         """)
 
-    con.execute("CREATE TABLE monthly AS " + monthly_candidates_sql())
+    con.execute(
+        "CREATE TABLE monthly AS " + monthly_candidates_sql(base="daily_base_judge")
+    )
 
     # --- 월 재판정 이어달리기 (03 §5.3) ---------------------------------
-    months = [r[0] for r in con.execute("SELECT DISTINCT ym FROM monthly ORDER BY ym").fetchall()]
+    #
+    # **달 M 의 멤버십은 달 M-1 의 통계로 정한다** (JUDGE_LAG_MONTHS).
+    # 패널이 그 달 첫 거래일을 리밸런스일로 쓰므로, 달 M 자신의 중앙값으로
+    # 정하면 그 시점에 알 수 없는 것을 쓰게 된다 (06_universe_lookahead.md).
+    target_months = [
+        r[0]
+        for r in con.execute(
+            "SELECT DISTINCT date_trunc('month', date) AS ym FROM daily_base ORDER BY ym"
+        ).fetchall()
+    ]
     con.execute("CREATE TABLE membership (ym DATE, symbol VARCHAR)")
     prev: set[str] = set()
-    for ym in months:
+    unjudged: list[str] = []
+    for ym in target_months:
+        src = _shift_months(ym, -JUDGE_LAG_MONTHS)
         rows = con.execute(
             """
             SELECT symbol, adv_20d, traded_days_20, etf_assumed, test_assumed, name_excluded
             FROM monthly WHERE ym = ?
             """,
-            [ym],
+            [src],
         ).fetchall()
+        if not rows:
+            # 근거가 될 달이 없다. **조용히 빈 달로 두지 않는다** — 결과에 적는다.
+            unjudged.append(str(ym))
+            prev = set()
+            continue
         keep = set()
         for symbol, adv, traded, is_etf, is_test, excluded in rows:
             if is_etf or is_test or excluded:
@@ -434,12 +486,14 @@ def build_universe_daily(
     ticker_as_of = sorted({row[2] for row in ticker_rows})
     return {
         "path": dest,
-        "months": len(months),
+        "months": len(target_months),
         "sessions": len(sessions),
         "non_session_dates_dropped": dropped,
         "input_snapshots": inputs,
         "start": start,
         "end": end,
+        "judge_lag_months": JUDGE_LAG_MONTHS,
+        "unjudged_months": unjudged,
         "ticker_map_snapshots": len(ticker_as_of),
         "ticker_map_first": str(ticker_as_of[0]) if ticker_as_of else None,
         "ticker_map_last": str(ticker_as_of[-1]) if ticker_as_of else None,
