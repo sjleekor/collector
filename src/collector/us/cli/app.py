@@ -200,7 +200,12 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     cal_sub = cal_parser.add_subparsers(dest="us_calendar_command", required=True)
     cal_build = _common(cal_sub.add_parser("build", help="exchange_calendars 를 굳힌다."))
     cal_build.add_argument("--start", default="2011-01-01")
-    cal_build.add_argument("--end", default="2026-12-31")
+    cal_build.add_argument(
+        "--end",
+        default=None,
+        help="기본은 오늘 + HORIZON_YEARS 년 말. **고정 날짜를 두지 않는다** — "
+        "그 날짜가 지나면 수집이 조용히 멈춘다.",
+    )
     cal_build.add_argument("--exchange", default="XNYS")
     cal_build.set_defaults(handler=_handle_calendar_build)
 

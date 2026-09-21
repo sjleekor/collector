@@ -72,10 +72,15 @@ def scan(
     *,
     snapshot_date,
     start: str = "2018-09-07",
-    end: str = "2026-09-09",
+    end: str | None = None,
     universe_only: bool = True,
 ) -> dict[str, object]:
-    """구멍 지도와 손상 스캔을 ``output/scan/``에 CSV로 남긴다."""
+    """구멍 지도와 손상 스캔을 ``output/scan/``에 CSV로 남긴다.
+
+    ``end`` 를 안 주면 ``prices_daily`` 의 마지막 날까지 본다.
+    **고정 날짜를 기본값에 두지 않는다** — 그 날짜가 지나면 뒤쪽을 조용히
+    안 보게 된다 (``universe/build.py`` 와 같은 실수였다).
+    """
     import duckdb
 
     from collector.us.store.writer import snapshot_path
@@ -86,6 +91,8 @@ def scan(
             f"CREATE VIEW {name} AS SELECT * FROM "
             f"read_parquet('{snapshot_path(root, name, snapshot_date)}')"
         )
+    if end is None:
+        end = str(con.execute("SELECT max(date) FROM prices_daily").fetchone()[0])
     scope = "AND u.in_universe" if universe_only else ""
     con.execute(f"""
         CREATE TABLE px AS

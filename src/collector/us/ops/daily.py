@@ -25,6 +25,13 @@ from collector.lake import DataRoot
 #: 주 단위로 도는 것의 기준. 파일이 이보다 오래되면 다시 받는다 (05 §4).
 WEEKLY_MAX_AGE_DAYS = 7
 
+class CalendarExhaustedError(RuntimeError):
+    """거래일 캘린더가 필요한 날짜까지 안 간다. **조용히 멈추면 안 된다.**"""
+
+
+#: 캘린더 끝이 이 안으로 들어오면 결과에 남긴다. 사람이 볼 수 있게.
+CALENDAR_WARN_DAYS = 180
+
 #: 하루 실행의 기본 예산. 05 §3.1이 말하는 "하루 약 35요청·3분"의 열 배다 —
 #: 며칠 꺼져 있었을 때 따라잡을 여지를 둔다.
 DEFAULT_BUDGET_SECONDS = 1_800.0
@@ -78,11 +85,36 @@ def sessions_through(root: DataRoot, *, until: dt.date) -> list:
         raise FileNotFoundError(
             "거래일 캘린더 스냅샷이 없다. 먼저 굳힌다 — collector us-calendar build"
         )
-    rows = duckdb.connect().execute(
+    con = duckdb.connect()
+    rows = con.execute(
         f"SELECT date FROM read_parquet('{path}')"
         f" WHERE date <= DATE '{until}' ORDER BY date"
     ).fetchall()
+    # **캘린더가 모자라면 조용히 적게 돌려주지 않는다.** 그러면 "받을 것이
+    # 없다"와 "캘린더가 끝났다"가 구별이 안 되고 수집이 exit 0 으로 멈춘다 —
+    # 옛 기본값 `end="2026-12-31"` 이 2027-01-01 에 그렇게 만들 뻔했다
+    # (2026-09-21 확인).
+    calendar_end = con.execute(f"SELECT max(date) FROM read_parquet('{path}')").fetchone()[0]
+    if calendar_end is not None and calendar_end < until:
+        raise CalendarExhaustedError(
+            f"거래일 캘린더가 {calendar_end} 에서 끝나는데 {until} 까지가 필요하다. "
+            "다시 굳힌다 — collector us-calendar build"
+        )
     return [r[0] for r in rows]
+
+
+def calendar_end(root: DataRoot) -> dt.date | None:
+    """굳혀 둔 캘린더의 마지막 날. 없으면 ``None``."""
+    import duckdb
+
+    from collector.us.store.writer import latest_snapshot
+
+    path = latest_snapshot(root, "trading_calendar")
+    if path is None:
+        return None
+    return duckdb.connect().execute(
+        f"SELECT max(date) FROM read_parquet('{path}')"
+    ).fetchone()[0]
 
 
 def _age_days(path: Path, today: dt.date) -> float:
@@ -366,11 +398,21 @@ def run_daily(
         else:
             raise ValueError(f"모르는 원천: {name!r} (있는 것: {sorted(SOURCES)})")
 
+    # **캘린더가 언제 끝나는지 매번 남긴다.** 끝나고 나서 알면 늦다.
+    cal_end = calendar_end(root)
+    days_left = (cal_end - today).days if cal_end else None
     return {
         "until": until,
         "sessions": len(sessions),
         "budget_spent": budget.spent(),
         "ok": all(r.ok for r in runs),
         "pending": sum(r.pending for r in runs),
+        "calendar_end": str(cal_end) if cal_end else None,
+        "calendar_days_left": days_left,
+        "calendar_warning": (
+            f"거래일 캘린더가 {days_left}일 뒤 끝난다 — collector us-calendar build"
+            if days_left is not None and days_left <= CALENDAR_WARN_DAYS
+            else None
+        ),
         "sources": [r.as_dict() for r in runs],
     }

@@ -222,7 +222,7 @@ def build_universe_daily(
     *,
     snapshot_date,
     start: str = "2018-09-07",
-    end: str = "2026-09-09",
+    end: str | None = None,
     observed_at=None,
 ) -> dict[str, object]:
     """``universe_daily``를 굳힌다.
@@ -230,6 +230,12 @@ def build_universe_daily(
     행은 **그날 가격이 있는 종목**이 기준이다. 상장 기록에만 있고 가격이 없는
     종목은 행으로 만들지 않고 커버리지 수치로 따로 센다 — 그쪽은 유니버스
     판정 대상이 아니라 구멍 지도의 재료다 (04 C6).
+
+    ``end`` 를 안 주면 **``prices_daily`` 에 있는 마지막 날**까지 간다.
+    **고정 날짜를 기본값에 두지 않는다** — 원래 ``"2026-09-09"`` 였다(C4 를
+    돌린 날의 가격 최대일). 그대로 두면 재판정을 몇 번 돌려도 유니버스가
+    **영원히 그 날짜에서 끊긴다.** 2026-09-21 재판정이 실제로 그랬다:
+    가격은 09-18 까지인데 결과가 09-09 에서 멈췄다.
     """
     import duckdb
 
@@ -242,6 +248,9 @@ def build_universe_daily(
     inputs = {n: p.parent.name.removeprefix("snapshot_date=") for n, p in resolved.items()}
     for name, path in resolved.items():
         con.execute(f"CREATE VIEW {name} AS SELECT * FROM read_parquet('{path}')")
+
+    if end is None:
+        end = str(con.execute("SELECT max(date) FROM prices_daily").fetchone()[0])
     # **티커 → CIK 는 PIT 다** (2026-09-21). 오늘자 맵 한 벌을 쓰면
     # 상폐·피인수·개명한 회사가 통째로 빠져 `cik` 이 붙었나가 곧 "2026년에도
     # 살아 있나"가 된다 — 끝까지 남은 종목 98.9% 대 사라진 종목 26.5%.
@@ -429,6 +438,8 @@ def build_universe_daily(
         "sessions": len(sessions),
         "non_session_dates_dropped": dropped,
         "input_snapshots": inputs,
+        "start": start,
+        "end": end,
         "ticker_map_snapshots": len(ticker_as_of),
         "ticker_map_first": str(ticker_as_of[0]) if ticker_as_of else None,
         "ticker_map_last": str(ticker_as_of[-1]) if ticker_as_of else None,

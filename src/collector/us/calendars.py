@@ -22,20 +22,36 @@ DEFAULT_EXCHANGE = "XNYS"
 #: 정규장 마감 시각(거래소 현지). 이보다 일찍 닫으면 조기 종료일이다.
 REGULAR_CLOSE = dt.time(16, 0)
 
+#: 캘린더를 **오늘로부터 이만큼 앞까지** 굳힌다.
+#:
+#: **끝 날짜를 코드에 박지 않는다.** 원래 기본값이 ``"2026-12-31"`` 이었다 —
+#: C5 를 돌린 해의 연말이다. 그대로 두면 **2027-01-01 에 새 세션이 0건이 되고
+#: 하루 실행이 조용히 멈춘다** (2026-09-21 확인). 날짜를 굳히지 말고 지평을
+#: 굳힌다.
+HORIZON_YEARS = 3
+
 
 def load_trading_calendar(
     root: DataRoot,
     *,
     snapshot_date: dt.date | str,
     start: dt.date | str = "2018-01-01",
-    end: dt.date | str = "2026-12-31",
+    end: dt.date | str | None = None,
     exchange: str = DEFAULT_EXCHANGE,
     observed_at: dt.datetime | None = None,
+    today: dt.date | None = None,
 ) -> dict[str, object]:
-    """``trading_calendar`` 한 장. 요청이 0이다 — 라이브러리가 준다."""
+    """``trading_calendar`` 한 장. 요청이 0이다 — 라이브러리가 준다.
+
+    ``end`` 를 안 주면 **오늘로부터 ``HORIZON_YEARS`` 년 뒤**까지 굳힌다.
+    고정 날짜를 기본값에 두면 그 날짜가 지나는 순간 수집이 멈춘다.
+    """
     import exchange_calendars as xcals
 
     observed_at = observed_at or dt.datetime.now(dt.UTC)
+    if end is None:
+        base = today or dt.date.today()
+        end = base.replace(year=base.year + HORIZON_YEARS, month=12, day=31)
     cal = xcals.get_calendar(exchange)
     sessions = cal.sessions_in_range(str(start), str(end))
 
