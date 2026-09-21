@@ -25,6 +25,9 @@ args=(us-derive run --budget-seconds "$BUDGET_SECONDS")
 if [[ -n "${SDC_US_DERIVE_TABLES:-}" ]]; then
   args+=(--tables "$SDC_US_DERIVE_TABLES")
 fi
+# 손으로 부를 때 `--dry-run`·`--force` 를 넘길 수 있어야 한다. 안 넘기면
+# dry-run 인 줄 알고 실제 실행을 돌리게 된다 — 2026-09-21 에 실제로 그랬다.
+args+=("$@")
 
 # 15:00 수집이 예산 30분을 다 쓰고 있을 수 있다.
 SDC_LOCK_WAIT_SECONDS="${SDC_LOCK_WAIT_SECONDS:-2400}"

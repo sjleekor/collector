@@ -18,6 +18,9 @@ args=(us-daily run --budget-seconds "$BUDGET_SECONDS")
 if [[ -n "${SDC_US_SOURCES:-}" ]]; then
   args+=(--sources "$SDC_US_SOURCES")
 fi
+# 손으로 부를 때 `--dry-run` 을 넘길 수 있어야 한다. Cronicle 은 인자 없이
+# 부르므로 비어 있다. `us-derive.sh` 와 같은 이유다 (2026-09-21).
+args+=("$@")
 
 # 락 대기를 넉넉히 준다. 예산이 30분이라 앞 실행이 아직 돌고 있을 수 있다.
 SDC_LOCK_WAIT_SECONDS="${SDC_LOCK_WAIT_SECONDS:-2400}"
