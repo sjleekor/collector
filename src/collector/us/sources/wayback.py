@@ -344,6 +344,38 @@ def download_company_tickers(
     }
 
 
+def fetch_live_company_tickers(root, *, user_agent: str, now=None) -> dict[str, object]:
+    """SEC 의 **지금** 맵을 받아 ``as_of=오늘`` 스냅샷으로 굳힌다.
+
+    **Wayback 만으로는 앞으로가 빈다.** 아카이브는 늦게 따라오고 최근 연도는
+    스냅샷이 얇다(2025년 11개·2026년 9개). 그러면 새로 상장한 종목이 한동안
+    ``cik`` 을 못 받는다.
+
+    **오늘 받은 맵을 ``as_of=오늘`` 로 두는 것은 PIT 다** — 그날 SEC 가 그렇게
+    말했다는 기록이고, ``date >= as_of`` 조인이라 과거 행에는 안 쓰인다.
+    이걸 매주 돌리면 **우리 스스로 PIT 계열을 쌓게 된다.**
+    """
+    import requests
+
+    from collector.us.sources import sec
+
+    now = now or _dt.datetime.now(_dt.UTC)
+    resp = requests.get(
+        sec.COMPANY_TICKERS_URL, headers={"User-Agent": user_agent}, timeout=120
+    )
+    if resp.status_code != 200:
+        raise WaybackFetchError(f"{resp.status_code} {sec.COMPANY_TICKERS_URL}")
+    dest = company_tickers_path(root, now.strftime("%Y%m%d%H%M%S"))
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(resp.content)
+    try:
+        as_of, pairs = parse_company_tickers(dest)
+    except WaybackParseError:
+        dest.unlink(missing_ok=True)  # 403 HTML 같은 것을 남기지 않는다
+        raise
+    return {"path": dest, "as_of": str(as_of), "tickers": len(pairs)}
+
+
 def parse_company_tickers(path: Path) -> tuple[_dt.date, list[tuple[str, int]]]:
     """``(as_of, [(SYMBOL, cik)])``.
 

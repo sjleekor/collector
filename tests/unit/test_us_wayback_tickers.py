@@ -145,3 +145,47 @@ def test_download_skips_what_is_already_there(tmp_path) -> None:
         "failed": [],
         "dir": wayback.company_tickers_dir(root),
     }
+
+
+def test_live_map_is_stored_with_todays_as_of(tmp_path, monkeypatch) -> None:
+    """**오늘 받은 맵을 as_of=오늘 로 두는 것은 PIT 다** — 과거 행에는 안 쓰인다."""
+    import datetime as dtm
+
+    root = DataRoot(tmp_path)
+
+    class _Resp:
+        status_code = 200
+        content = json.dumps(SAMPLE).encode()
+
+    monkeypatch.setattr("requests.get", lambda *a, **k: _Resp())
+    out = wayback.fetch_live_company_tickers(
+        root, user_agent="t", now=dtm.datetime(2026, 9, 21, 23, 5, tzinfo=dtm.UTC)
+    )
+    assert out["as_of"] == "2026-09-21"
+    assert out["tickers"] == 2
+    rows = wayback.ticker_cik_map(root)
+    assert {d for *_, d in rows} == {date(2026, 9, 21)}
+
+
+def test_live_map_does_not_keep_a_bad_body(tmp_path, monkeypatch) -> None:
+    """403 HTML 을 스냅샷으로 남기면 그 뒤 모든 실행이 죽는다."""
+
+    class _Resp:
+        status_code = 200
+        content = b"<html>Forbidden</html>"
+
+    monkeypatch.setattr("requests.get", lambda *a, **k: _Resp())
+    root = DataRoot(tmp_path)
+    with pytest.raises(wayback.WaybackParseError):
+        wayback.fetch_live_company_tickers(root, user_agent="t")
+    assert not list(wayback.company_tickers_dir(root).glob("*.json"))
+
+
+def test_live_map_raises_on_non_200(tmp_path, monkeypatch) -> None:
+    class _Resp:
+        status_code = 403
+        content = b""
+
+    monkeypatch.setattr("requests.get", lambda *a, **k: _Resp())
+    with pytest.raises(wayback.WaybackFetchError, match="403"):
+        wayback.fetch_live_company_tickers(DataRoot(tmp_path), user_agent="t")

@@ -103,7 +103,14 @@ def _handle_tickers_sync(args: argparse.Namespace) -> None:
     if args.dry_run:
         _print({"available": len(stamps), "first": stamps[:1], "last": stamps[-1:]})
         return
-    result = wayback.download_company_tickers(client, _root(args), timestamps=stamps)
+    root = _root(args)
+    result = wayback.download_company_tickers(client, root, timestamps=stamps)
+    # **아카이브만으로는 앞으로가 빈다.** 오늘 SEC 가 뭐라고 하는지를 같이
+    # 굳혀 두면 우리 스스로 PIT 계열을 쌓게 된다.
+    if not args.no_live:
+        result["live"] = wayback.fetch_live_company_tickers(
+            root, user_agent=sec.user_agent_from_env()
+        )
     _print(result)
     if result["failed"]:
         raise SystemExit(1)
@@ -223,6 +230,11 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         type=float,
         default=None,
         help=f"요청 간격 (기본 {1.0}s). Wayback 은 공표된 한도가 없다.",
+    )
+    tick_sync.add_argument(
+        "--no-live",
+        action="store_true",
+        help="SEC 의 지금 맵을 as_of=오늘 로 굳히는 것을 건너뛴다.",
     )
     tick_sync.add_argument("--dry-run", action="store_true", help="몇 개인지만 본다.")
     tick_sync.set_defaults(handler=_handle_tickers_sync)

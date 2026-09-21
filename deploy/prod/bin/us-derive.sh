@@ -32,3 +32,13 @@ args+=("$@")
 # 15:00 수집이 예산 30분을 다 쓰고 있을 수 있다.
 SDC_LOCK_WAIT_SECONDS="${SDC_LOCK_WAIT_SECONDS:-2400}"
 sdc_run_daily_collector us "${args[@]}"
+
+# **티커 맵을 최신으로 유지한다** (2026-09-21). `universe_daily.cik` 이 이제
+# PIT 맵을 쓴다 — 안 갱신하면 새로 상장한 종목이 `cik` 을 못 받는다.
+# Wayback 은 늦게 따라오므로 SEC 의 지금 맵도 `as_of=오늘` 로 같이 굳힌다.
+#
+# **굳히기(derive) 뒤에 둔다.** 여기서 실패해도 derive 는 이미 끝나 있고,
+# 실패는 잡 exit code 로 그대로 드러난다 — 조용히 삼키지 않는다.
+if [[ "${SDC_US_SKIP_TICKERS:-0}" != "1" ]]; then
+  sdc_run_collector_with_lock us us-tickers sync
+fi
