@@ -49,10 +49,17 @@ def load_trading_calendar(
     import exchange_calendars as xcals
 
     observed_at = observed_at or dt.datetime.now(dt.UTC)
+    cal = xcals.get_calendar(exchange)
     if end is None:
         base = today or dt.date.today()
-        end = base.replace(year=base.year + HORIZON_YEARS, month=12, day=31)
-    cal = xcals.get_calendar(exchange)
+        want = base.replace(year=base.year + HORIZON_YEARS, month=12, day=31)
+        # **라이브러리가 앞을 무한히 주지 않는다.** XNYS 는 대략 오늘+1년까지만
+        # 세션을 만든다 (2026-09-22 실측: 2027-09-22). 넘겨 달라고 하면
+        # DateOutOfBounds 로 죽는다 — 원하는 지평을 한계로 자른다.
+        #
+        # **그래서 캘린더는 주기적으로 다시 굳혀야 한다.** 한 번 만들고 두면
+        # 1년 뒤 수집이 멈춘다. 주 1회 `us-derive` 가 남은 날을 보고 다시 굳힌다.
+        end = min(want, cal.last_session.date())
     sessions = cal.sessions_in_range(str(start), str(end))
 
     closes = cal.closes.loc[sessions]

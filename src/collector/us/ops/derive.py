@@ -45,6 +45,9 @@ class Recipe:
     dolt_repo: str | None = None
     #: ``raw/`` 아래 상대 경로들. ``dolt_repo`` 가 없을 때 mtime 으로 판단한다
     raw_inputs: tuple[str, ...] = ()
+    #: **앞을 내다보는 표.** 표의 마지막 날이 오늘로부터 이만큼 안으로
+    #: 들어오면 다시 굳힌다. 원천이 아니라 지평이 판단 근거다.
+    horizon_days: int | None = None
 
 
 #: ``us-load <key>`` 와 ``us-derive run`` 이 같이 쓰는 표. **여기가 정본이다** —
@@ -110,11 +113,19 @@ RECIPES: dict[str, Recipe] = {
         ("listing_snapshots",),
         raw_inputs=("wayback/symdir",),
     ),
+    # **원천이 없는 표다.** `exchange_calendars` 가 주는데, 그 라이브러리가
+    # 대략 오늘+1년까지만 세션을 만든다. 한 번 굳히고 두면 그 날짜에 하루
+    # 실행이 조용히 멈춘다 — 옛 기본값 `end="2026-12-31"` 이 2027-01-01 에
+    # 그럴 참이었다 (2026-09-21). 남은 날로 판단해 미리 늘려 둔다.
+    "trading-calendar": Recipe(
+        "collector.us.calendars:load_trading_calendar",
+        ("trading_calendar",),
+        horizon_days=270,
+    ),
 }
 
 #: ``us-derive`` 를 안 거치고 굳는 표. **왜 안 거치는지**를 같이 적는다.
 NOT_DERIVED: dict[str, str] = {
-    "trading_calendar": "us-calendar build — exchange_calendars 를 굳힌다",
     "universe_daily": "us-universe rebuild — 월 1회 재판정 (03 §5.3)",
     "macro_series": "us-daily 의 weekly_macro — FRED, 주 1회",
     "index_constituents": "us-daily 의 weekly_macro — Wikipedia, 주 1회",
@@ -188,6 +199,21 @@ def needs_rebuild(root: DataRoot, name: str, recipe: Recipe) -> tuple[bool, str]
     snap = latest_snapshot(root, recipe.tables[0])
     if snap is None:
         return True, "스냅샷이 없다"
+
+    if recipe.horizon_days is not None:
+        import datetime as _dt
+
+        import duckdb
+
+        last = duckdb.connect().execute(
+            f"SELECT max(date) FROM read_parquet('{snap}')"
+        ).fetchone()[0]
+        if last is None:
+            return True, "표가 비었다"
+        left = (last - _dt.date.today()).days
+        if left <= recipe.horizon_days:
+            return True, f"{left}일 뒤 끝난다 (지평 {recipe.horizon_days}일)"
+        return False, f"{left}일 남았다"
 
     if recipe.dolt_repo:
         from collector.us.sources import dolt

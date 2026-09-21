@@ -52,9 +52,45 @@ def test_no_stale_table_names() -> None:
 
 
 def test_every_recipe_says_how_it_knows_it_is_stale() -> None:
-    """``dolt_repo`` 든 ``raw_inputs`` 든 하나는 있어야 한다."""
+    """판단 근거가 셋 중 하나는 있어야 한다 — 없으면 늘 다시 굳히게 된다."""
     for name, recipe in derive.RECIPES.items():
-        assert recipe.dolt_repo or recipe.raw_inputs, f"{name} 은 판단 근거가 없다"
+        assert (
+            recipe.dolt_repo or recipe.raw_inputs or recipe.horizon_days is not None
+        ), f"{name} 은 판단 근거가 없다"
+
+
+def test_horizon_table_is_rebuilt_before_it_runs_out(tmp_path) -> None:
+    """**앞을 내다보는 표.** 남은 날이 지평 안으로 들어오면 다시 굳힌다.
+
+    `trading_calendar` 이 그렇다. `exchange_calendars` 가 대략 오늘+1년까지만
+    주므로 한 번 굳히고 두면 그 날짜에 하루 실행이 조용히 멈춘다.
+    """
+    import datetime as dtm
+
+    import pyarrow as pyar
+    import pyarrow.parquet as pq
+
+    from collector.us.store.writer import snapshot_path
+
+    recipe = derive.RECIPES["trading-calendar"]
+    assert recipe.horizon_days is not None
+
+    def _cal(root: DataRoot, last: dtm.date) -> None:
+        path = snapshot_path(root, "trading_calendar", "2026-09-19")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(pyar.table({"date": pyar.array([last], pyar.date32())}), path)
+
+    today = dtm.date.today()
+
+    far = DataRoot(tmp_path / "far")
+    _cal(far, today + dtm.timedelta(days=recipe.horizon_days + 30))
+    should, why = derive.needs_rebuild(far, "trading-calendar", recipe)
+    assert not should and "남았다" in why
+
+    near = DataRoot(tmp_path / "near")
+    _cal(near, today + dtm.timedelta(days=recipe.horizon_days - 30))
+    should, why = derive.needs_rebuild(near, "trading-calendar", recipe)
+    assert should and "끝난다" in why
 
 
 def test_cli_loaders_come_from_recipes() -> None:
