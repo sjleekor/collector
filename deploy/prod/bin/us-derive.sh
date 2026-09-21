@@ -39,6 +39,16 @@ sdc_run_daily_collector us "${args[@]}"
 #
 # **굳히기(derive) 뒤에 둔다.** 여기서 실패해도 derive 는 이미 끝나 있고,
 # 실패는 잡 exit code 로 그대로 드러난다 — 조용히 삼키지 않는다.
+#
+# **`--dry-run` 은 여기까지 넘긴다.** 안 넘기면 "확인만 해 보자" 하고 부른
+# 것이 실제로 받는다 — 2026-09-21 에 `us-derive.sh --dry-run` 이 정확히
+# 그랬다. 나머지 인자는 안 넘긴다. `--tables` 같은 것은 derive 전용이라
+# sync 에 주면 죽는다.
+tick_args=()
+for a in "$@"; do
+  [[ "$a" == "--dry-run" ]] && tick_args+=(--dry-run)
+done
+
 if [[ "${SDC_US_SKIP_TICKERS:-0}" != "1" ]]; then
-  sdc_run_collector_with_lock us us-tickers sync
+  sdc_run_collector_with_lock us us-tickers sync "${tick_args[@]+"${tick_args[@]}"}"
 fi
