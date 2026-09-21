@@ -203,3 +203,44 @@ def test_pit_join_leaves_an_unknown_symbol_null():
     assert _pit_cik([(dt.date(2020, 6, 1), "NOPE")], [("XYZ", 1, dt.date(2019, 1, 1))]) == [
         (dt.date(2020, 6, 1), "NOPE", None)
     ]
+
+
+def _fake_snapshots(root, spec):
+    for name, days in spec.items():
+        for day in days:
+            d = root.derived / "snapshots" / name / f"snapshot_date={day}"
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "part.parquet").write_bytes(b"")
+
+
+ALL_AT = {n: ["2026-09-18"] for n in build.INPUT_TABLES}
+
+
+def test_resolve_inputs_takes_the_latest_of_each_table(tmp_path):
+    """**입력을 출력 날짜로 찾으면 안 된다** (2026-09-21).
+
+    표마다 굳는 주기가 달라 오늘 날짜로 찾으면 거의 늘 없다 — C8 이
+    `weekly_macro` 에서 겪은 것과 같은 버그다 (04 §2.17). 실제로 2026-09-21 에
+    `prices_daily` 만 09-21 이고 나머지 셋이 09-18 이라 재판정이 안 돌았다.
+    """
+    from collector.lake import DataRoot
+
+    root = DataRoot(tmp_path)
+    spec = dict(ALL_AT)
+    spec["prices_daily"] = ["2026-09-18", "2026-09-21"]
+    _fake_snapshots(root, spec)
+
+    got = {n: p.parent.name for n, p in build.resolve_inputs(root).items()}
+    assert got["prices_daily"] == "snapshot_date=2026-09-21"
+    assert got["listing_snapshots"] == "snapshot_date=2026-09-18"
+    assert set(got) == set(build.INPUT_TABLES)
+
+
+def test_resolve_inputs_says_which_table_is_missing(tmp_path):
+    from collector.lake import DataRoot
+
+    root = DataRoot(tmp_path)
+    spec = {n: ["2026-09-18"] for n in build.INPUT_TABLES if n != "filings_sub"}
+    _fake_snapshots(root, spec)
+    with pytest.raises(FileNotFoundError, match="filings_sub"):
+        build.resolve_inputs(root)

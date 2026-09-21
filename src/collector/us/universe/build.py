@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+from pathlib import Path
 
 #: 진입·유지 문턱 (03 §5.3). 유지가 낮아 경계에서 덜 흔들린다.
 ENTRY_ADV_USD = 1_000_000
@@ -174,6 +175,35 @@ def monthly_candidates_sql(*, base: str = "daily_base", listing: str = "listing_
     """
 
 
+#: ``universe_daily`` 를 굳히는 데 필요한 표. **가장 최근 스냅샷을 쓴다.**
+INPUT_TABLES: tuple[str, ...] = (
+    "prices_daily",
+    "listing_snapshots",
+    "filings_sub",
+    "midas_security_daily",
+)
+
+def resolve_inputs(root) -> dict[str, Path]:
+    """``INPUT_TABLES`` 마다 **가장 최근 스냅샷** 경로.
+
+    **출력 ``snapshot_date`` 로 찾으면 안 된다.** 표마다 굳는 주기가 달라
+    오늘 날짜로 찾으면 거의 늘 없다 — C8 이 ``weekly_macro`` 에서 이미 겪은
+    그 버그다 (04 §2.17). 2026-09-21 에 ``prices_daily`` 만 09-21 이고 나머지
+    셋이 09-18 이라 재판정이 아예 안 돌았다.
+    """
+    from collector.us.store.writer import latest_snapshot
+
+    out = {}
+    for name in INPUT_TABLES:
+        path = latest_snapshot(root, name)
+        if path is None:
+            raise FileNotFoundError(
+                f"{name} 스냅샷이 없다. 먼저 굳힌다 — collector us-derive run"
+            )
+        out[name] = path
+    return out
+
+
 #: 티커 → CIK 를 **PIT 로** 붙이는 조인 (2026-09-21).
 #:
 #: 오늘자 맵 한 벌을 쓰면 상폐·피인수·개명한 회사가 통째로 빠져서 `cik` 이
@@ -208,11 +238,10 @@ def build_universe_daily(
     observed_at = observed_at or _dt.datetime.now(_dt.UTC)
     con = duckdb.connect()
 
-    def snap(name):
-        return snapshot_path(root, name, snapshot_date)
-
-    for name in ("prices_daily", "listing_snapshots", "filings_sub", "midas_security_daily"):
-        con.execute(f"CREATE VIEW {name} AS SELECT * FROM read_parquet('{snap(name)}')")
+    resolved = resolve_inputs(root)
+    inputs = {n: p.parent.name.removeprefix("snapshot_date=") for n, p in resolved.items()}
+    for name, path in resolved.items():
+        con.execute(f"CREATE VIEW {name} AS SELECT * FROM read_parquet('{path}')")
     # **티커 → CIK 는 PIT 다** (2026-09-21). 오늘자 맵 한 벌을 쓰면
     # 상폐·피인수·개명한 회사가 통째로 빠져 `cik` 이 붙었나가 곧 "2026년에도
     # 살아 있나"가 된다 — 끝까지 남은 종목 98.9% 대 사라진 종목 26.5%.
@@ -391,10 +420,17 @@ def build_universe_daily(
         [observed_at],
     )
     stats = verify_snapshot(dest, "universe_daily", unique_on=("date", "symbol"))
+    # **무엇으로 만들었는지 같이 남긴다.** 입력 스냅샷이 표마다 다른 날짜일
+    # 수 있으므로 어느 것을 썼는지 적어야 재현이 된다.
+    ticker_as_of = sorted({row[2] for row in ticker_rows})
     return {
         "path": dest,
         "months": len(months),
         "sessions": len(sessions),
         "non_session_dates_dropped": dropped,
+        "input_snapshots": inputs,
+        "ticker_map_snapshots": len(ticker_as_of),
+        "ticker_map_first": str(ticker_as_of[0]) if ticker_as_of else None,
+        "ticker_map_last": str(ticker_as_of[-1]) if ticker_as_of else None,
         **stats,
     }

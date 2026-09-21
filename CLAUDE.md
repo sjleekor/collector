@@ -92,9 +92,10 @@ uv run collector --help
 
 | | |
 |---|---|
-| **명령** | `us-daily run`(raw 하루치) · **`us-derive run`(raw→derived, 주 1회)** · `us-load <table>` · `us-calendar build` · `us-universe rebuild` · `us-prune` |
+| **명령** | `us-daily run`(raw 하루치) · **`us-derive run`(raw→derived, 주 1회)** · **`us-tickers sync`(과거 티커 맵)** · `us-load <table>` · `us-calendar build` · `us-universe rebuild` · `us-prune` |
 | **한 줄로 돈다** | 할 일을 일정이 아니라 **`raw/`에 무엇이 있나**로 만든다. backfill과 상시 운영이 같은 함수를 쓴다 |
 | **`us-daily`는 raw만 받는다** | 굳히는 것은 **`us-derive`가 따로 한다.** 2026-09-21까지 그 자리가 없어서 `dolt pull`은 매일 도는데 `prices_daily` 스냅샷이 2026-09-09에 멈춰 있었다 |
+| **티커 → CIK 는 PIT 다** | `universe_daily.cik` 이 SEC 의 **오늘자** 맵에서 왔었다 — 상폐·개명 회사가 빠져 `cik` 이 붙었나가 곧 "지금도 살아 있나"였다(남은 종목 98.9% 대 사라진 종목 26.5%). **`us-tickers sync` 로 Wayback 스냅샷 562개를 받아 `ASOF` 로 붙인다** (`build.TICKER_PIT_JOIN`). 합집합으로 합치면 안 된다 — 티커 재사용이 4.34% 다 |
 | **무엇을 굳힐지는 입력이 정한다** | dolt는 커밋 해시(`source_rev`), 나머지는 `raw/` mtime을 스냅샷과 비교한다. 굳히는 법과 판단 근거는 전부 `us/ops/derive.py`의 `RECIPES`에 있다 — `us-load` 목록도 거기서 나온다 |
 | **`dolt`가 이미지에 있다** | 2.3.5. 미국 가격·IV/HV 원천이다. 없으면 `us-daily`가 첫 원천에서 멈춘다 |
 | **레이크 정본은 서버다** | `/home/whi/data/stock_data/us`. 맥은 `deploy/local/us-mirror.sh`로 당겨 읽는다 |
