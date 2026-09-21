@@ -144,3 +144,62 @@ def test_spike_rule_is_symmetric():
     assert 1 / coverage.SPIKE_RATIO == pytest.approx(0.3333333, rel=1e-6)
     assert coverage.NEIGHBOUR_TOLERANCE == 0.30
     assert coverage.FLAT_RUN_DAYS == 5
+
+
+# --- 티커 → CIK 를 PIT 로 붙인다 (2026-09-21) --------------------------------
+
+
+def _pit_cik(rows, ticker_rows):
+    """``build_universe_daily`` 와 **같은 조인 문자열**로 붙여 본다.
+
+    `TICKER_PIT_JOIN` 을 공유하므로 조인 조건이 바뀌면 이 시험이 같이 바뀐다.
+    """
+    con = duckdb.connect()
+    con.execute("CREATE TABLE daily_base (date DATE, symbol VARCHAR)")
+    con.executemany("INSERT INTO daily_base VALUES (?, ?)", rows)
+    con.execute("CREATE TABLE ticker_pit (symbol VARCHAR, cik BIGINT, as_of DATE)")
+    con.executemany("INSERT INTO ticker_pit VALUES (?, ?, ?)", ticker_rows)
+    return con.execute(
+        "SELECT b.date, b.symbol, ct.cik FROM daily_base b "
+        + build.TICKER_PIT_JOIN.format(left="b")
+        + " ORDER BY b.date"
+    ).fetchall()
+
+
+def test_pit_join_uses_the_snapshot_in_force_on_that_date():
+    """**티커 재사용.** 같은 심볼이 2019년엔 111, 2023년엔 222 다."""
+    rows = [
+        (dt.date(2018, 6, 1), "XYZ"),
+        (dt.date(2020, 6, 1), "XYZ"),
+        (dt.date(2024, 6, 1), "XYZ"),
+    ]
+    tickers = [
+        ("XYZ", 111, dt.date(2019, 1, 19)),
+        ("XYZ", 222, dt.date(2023, 1, 3)),
+    ]
+    got = _pit_cik(rows, tickers)
+    assert got == [
+        (dt.date(2018, 6, 1), "XYZ", None),  # 첫 스냅샷 이전 — 모른다
+        (dt.date(2020, 6, 1), "XYZ", 111),
+        (dt.date(2024, 6, 1), "XYZ", 222),
+    ]
+
+
+def test_pit_join_does_not_use_a_future_snapshot():
+    """**이게 핵심이다.** 미래 맵을 끌어다 쓰면 룩어헤드가 된다."""
+    rows = [(dt.date(2018, 6, 1), "LATER")]
+    tickers = [("LATER", 999, dt.date(2026, 9, 19))]
+    assert _pit_cik(rows, tickers) == [(dt.date(2018, 6, 1), "LATER", None)]
+
+
+def test_pit_join_keeps_a_delisted_symbol_attached_after_it_is_gone():
+    """상폐된 뒤에도 **그 시점 행에는** cik 이 붙어 있어야 한다."""
+    rows = [(dt.date(2019, 6, 3), "AABA"), (dt.date(2020, 6, 1), "AABA")]
+    tickers = [("AABA", 1011006, dt.date(2019, 1, 19))]
+    assert [c for *_, c in _pit_cik(rows, tickers)] == [1011006, 1011006]
+
+
+def test_pit_join_leaves_an_unknown_symbol_null():
+    assert _pit_cik([(dt.date(2020, 6, 1), "NOPE")], [("XYZ", 1, dt.date(2019, 1, 1))]) == [
+        (dt.date(2020, 6, 1), "NOPE", None)
+    ]

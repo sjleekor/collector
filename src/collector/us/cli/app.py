@@ -88,6 +88,27 @@ def _handle_load(args: argparse.Namespace) -> None:
     _print(func(_root(args), snapshot_date=_snapshot_date(args)))
 
 
+def _handle_tickers_sync(args: argparse.Namespace) -> None:
+    from collector.us.sources import sec, wayback
+
+    client = wayback.WaybackClient(
+        user_agent=sec.user_agent_from_env(),
+        interval_seconds=args.interval_seconds or wayback.WAYBACK_INTERVAL_SECONDS,
+    )
+    stamps = wayback.cdx_timestamps(client)
+    if args.since:
+        stamps = [t for t in stamps if t >= args.since]
+    if args.limit:
+        stamps = stamps[: args.limit]
+    if args.dry_run:
+        _print({"available": len(stamps), "first": stamps[:1], "last": stamps[-1:]})
+        return
+    result = wayback.download_company_tickers(client, _root(args), timestamps=stamps)
+    _print(result)
+    if result["failed"]:
+        raise SystemExit(1)
+
+
 def _handle_derive_run(args: argparse.Namespace) -> None:
     from collector.us.ops import derive
 
@@ -181,6 +202,30 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     )
     load_parser.add_argument("table", choices=sorted(_loaders()))
     load_parser.set_defaults(handler=_handle_load)
+
+    tick_parser = subparsers.add_parser(
+        "us-tickers", help="과거 티커→CIK 맵 (Wayback). `universe`의 PIT join 재료."
+    )
+    tick_sub = tick_parser.add_subparsers(dest="us_tickers_command", required=True)
+    tick_sync = _common(
+        tick_sub.add_parser(
+            "sync",
+            help="Wayback 의 company_tickers.json 스냅샷을 받는다. "
+            "**있는 것은 다시 안 받는다.**",
+        )
+    )
+    tick_sync.add_argument(
+        "--since", default=None, help="이 timestamp(YYYYMMDDhhmmss) 이후만."
+    )
+    tick_sync.add_argument("--limit", type=int, default=None, help="앞에서 N개만.")
+    tick_sync.add_argument(
+        "--interval-seconds",
+        type=float,
+        default=None,
+        help=f"요청 간격 (기본 {1.0}s). Wayback 은 공표된 한도가 없다.",
+    )
+    tick_sync.add_argument("--dry-run", action="store_true", help="몇 개인지만 본다.")
+    tick_sync.set_defaults(handler=_handle_tickers_sync)
 
     derive_parser = subparsers.add_parser(
         "us-derive", help="raw/ 를 derived/ 스냅샷으로 굳힌다 — 바뀐 것만 (05 §4.1)."

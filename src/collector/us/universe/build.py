@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import datetime as _dt
-import json as _json
 
 #: 진입·유지 문턱 (03 §5.3). 유지가 낮아 경계에서 덜 흔들린다.
 ENTRY_ADV_USD = 1_000_000
@@ -175,6 +174,19 @@ def monthly_candidates_sql(*, base: str = "daily_base", listing: str = "listing_
     """
 
 
+#: 티커 → CIK 를 **PIT 로** 붙이는 조인 (2026-09-21).
+#:
+#: 오늘자 맵 한 벌을 쓰면 상폐·피인수·개명한 회사가 통째로 빠져서 `cik` 이
+#: 붙었나가 곧 "2026년에도 살아 있나"가 된다 — 끝까지 남은 종목 98.9% 대
+#: 사라진 종목 26.5% (2026-09-21 실측 · 2차 후속 `03_cik_pit_probe.md`).
+#:
+#: **시험이 이 문자열을 그대로 쓴다.** 조인 조건을 여기서만 고치면 된다.
+TICKER_PIT_JOIN = (
+    "ASOF LEFT JOIN ticker_pit ct\n"
+    "                   ON ct.symbol = {left}.symbol AND {left}.date >= ct.as_of"
+)
+
+
 def build_universe_daily(
     root,
     *,
@@ -201,13 +213,20 @@ def build_universe_daily(
 
     for name in ("prices_daily", "listing_snapshots", "filings_sub", "midas_security_daily"):
         con.execute(f"CREATE VIEW {name} AS SELECT * FROM read_parquet('{snap(name)}')")
-    tickers = root.raw / "sec" / "company_tickers" / "company_tickers.json"
-    # company_tickers.json 은 {"0": {...}, "1": {...}} 꼴이라 read_json 으로
-    # 바로 안 열린다. 1만 건뿐이니 파이썬으로 읽어 등록한다.
-    entries = _json.loads(tickers.read_text())
-    pairs = sorted({(str(v["ticker"]).upper(), int(v["cik_str"])) for v in entries.values()})
-    con.execute("CREATE TABLE company_tickers (symbol VARCHAR, cik BIGINT)")
-    con.executemany("INSERT INTO company_tickers VALUES (?, ?)", pairs)
+    # **티커 → CIK 는 PIT 다** (2026-09-21). 오늘자 맵 한 벌을 쓰면
+    # 상폐·피인수·개명한 회사가 통째로 빠져 `cik` 이 붙었나가 곧 "2026년에도
+    # 살아 있나"가 된다 — 끝까지 남은 종목 98.9% 대 사라진 종목 26.5%.
+    # 아래 ASOF 조인이 `date >= as_of` 중 최신 스냅샷을 쓴다.
+    from collector.us.sources import wayback
+
+    ticker_rows = wayback.ticker_cik_map(root)
+    con.execute("CREATE TABLE company_tickers (symbol VARCHAR, cik BIGINT, as_of DATE)")
+    con.executemany("INSERT INTO company_tickers VALUES (?, ?, ?)", ticker_rows)
+    # ASOF 조인은 오른쪽이 키별로 정렬돼 있어야 싸다.
+    con.execute(
+        "CREATE TABLE ticker_pit AS "
+        "SELECT symbol, cik, as_of FROM company_tickers ORDER BY symbol, as_of"
+    )
 
     # dolt symbol 의 현재값. Wayback 이 그 날짜를 못 덮을 때만 쓴다 — PIT 는
     # 아니지만 "모르면 FALSE" 보다 낫다. ZWZZT(나스닥 테스트 심볼)와
@@ -331,6 +350,7 @@ def build_universe_daily(
 
     dest = snapshot_path(root, "universe_daily", snapshot_date)
     dest.parent.mkdir(parents=True, exist_ok=True)
+    ticker_pit_join = TICKER_PIT_JOIN.format(left="b")
     con.execute(
         f"""
         COPY (
@@ -355,7 +375,7 @@ def build_universe_daily(
                 CAST(? AS TIMESTAMP WITH TIME ZONE)    AS observed_at
             FROM daily_base b
             LEFT JOIN listing_daily ld ON ld.date = b.date AND ld.symbol = b.symbol
-            LEFT JOIN company_tickers ct ON ct.symbol = b.symbol
+            {ticker_pit_join}
             LEFT JOIN membership m
                    ON m.ym = date_trunc('month', b.date) AND m.symbol = b.symbol
             LEFT JOIN midas_security_daily md
