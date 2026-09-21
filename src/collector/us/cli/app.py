@@ -65,25 +65,44 @@ def _handle_calendar_build(args: argparse.Namespace) -> None:
     )
 
 
-#: ``us-load``가 아는 표. 전부 **``raw/``만 읽는다** — 네트워크를 안 탄다.
-_LOADERS: dict[str, str] = {
-    "short-interest": "collector.us.sources.finra:load_short_interest",
-    "short-volume": "collector.us.sources.finra:load_short_volume",
-    "earnings-calendar": "collector.us.sources.nasdaq:load_earnings_calendar",
-    "insider": "collector.us.sources.sec:extract_insider",
-    "filings-sub": "collector.us.sources.sec:extract_filings_sub",
-    "midas": "collector.us.sources.sec:extract_midas",
-    "fundamentals": "collector.us.sources.sec_bulk:load_companyfacts",
-    "submissions": "collector.us.sources.sec_bulk:load_submissions",
-}
+def _loaders() -> dict[str, str]:
+    """``us-load``가 아는 표.
+
+    **정본은 :mod:`collector.us.ops.derive` 의 ``RECIPES``** 다 — 굳히는 법과
+    "언제 다시 굳히나"를 한자리에 둔다. 여기서 또 적으면 둘이 벌어진다.
+
+    전부 **네트워크를 안 탄다** — ``raw/``에 받아 둔 것만 읽는다.
+    ``corp-actions``만 ``derived/splits/``의 보충 분할표도 읽는데 그것도 이미
+    레이크에 있는 파일이다 (03 §2.1).
+    """
+    from collector.us.ops.derive import RECIPES
+
+    return {name: recipe.loader for name, recipe in RECIPES.items()}
 
 
 def _handle_load(args: argparse.Namespace) -> None:
     import importlib
 
-    module_name, _, func_name = _LOADERS[args.table].partition(":")
+    module_name, _, func_name = _loaders()[args.table].partition(":")
     func = getattr(importlib.import_module(module_name), func_name)
     _print(func(_root(args), snapshot_date=_snapshot_date(args)))
+
+
+def _handle_derive_run(args: argparse.Namespace) -> None:
+    from collector.us.ops import derive
+
+    tables = tuple(t.strip() for t in args.tables.split(",")) if args.tables else None
+    result = derive.run_derive(
+        _root(args),
+        snapshot_date=_snapshot_date(args),
+        tables=tables,
+        force=args.force,
+        budget_seconds=args.budget_seconds,
+        dry_run=args.dry_run,
+    )
+    _print(result)
+    if not result["ok"]:
+        raise SystemExit(1)
 
 
 def _handle_universe_rebuild(args: argparse.Namespace) -> None:
@@ -160,8 +179,36 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     load_parser = _common(
         subparsers.add_parser("us-load", help="raw/ 에 받아 둔 것을 스냅샷으로 굳힌다.")
     )
-    load_parser.add_argument("table", choices=sorted(_LOADERS))
+    load_parser.add_argument("table", choices=sorted(_loaders()))
     load_parser.set_defaults(handler=_handle_load)
+
+    derive_parser = subparsers.add_parser(
+        "us-derive", help="raw/ 를 derived/ 스냅샷으로 굳힌다 — 바뀐 것만 (05 §4.1)."
+    )
+    derive_sub = derive_parser.add_subparsers(dest="us_derive_command", required=True)
+    derive_run = _common(
+        derive_sub.add_parser(
+            "run",
+            help="입력이 바뀐 표만 다시 굳힌다. **유니버스는 여기 없다** — "
+            "월 1회라 us-universe rebuild 가 따로 한다.",
+        )
+    )
+    derive_run.add_argument(
+        "--tables", default=None, help="쉼표로 고른다. 기본은 전부 본다."
+    )
+    derive_run.add_argument(
+        "--force", action="store_true", help="안 바뀌었어도 다시 굳힌다."
+    )
+    derive_run.add_argument(
+        "--budget-seconds",
+        type=float,
+        default=None,
+        help="이 시간이 지나면 멈춘다. 남은 것은 다음 실행이 한다.",
+    )
+    derive_run.add_argument(
+        "--dry-run", action="store_true", help="무엇을 굳힐지만 본다."
+    )
+    derive_run.set_defaults(handler=_handle_derive_run)
 
     uni_parser = subparsers.add_parser("us-universe", help="PIT 유니버스 (04 C4).")
     uni_sub = uni_parser.add_subparsers(dest="us_universe_command", required=True)

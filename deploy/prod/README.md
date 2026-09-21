@@ -8,6 +8,7 @@
 - 배포 경로: `whi@sj2-server:/home/whi/apps/sdc`
 - 현재 compose image: **`ghcr.io/sjleekor/collector:v0.15.0`** (2026-09-20 기준 원격과 이 저장소가 같다)
 - 현재 상시 기동 서비스: `db`만 기동. `collector`는 Cronicle wrapper가 `docker compose run --rm collector ...`로 작업마다 실행한다.
+- **2026-09-21에 `us-derive.sh`를 더했다.** raw→derived를 굳히는 자리가 없었다 — 자세한 것은 아래 이벤트 표의 `sdc_daily_us_derive` 행. **이미지에는 `v0.15.0` 다음 릴리즈부터 들어간다.** 그 전에 배포하면 래퍼는 있는데 `us-derive` 명령이 없어 실패한다.
 - **2026-09-20부터 미국 수집도 여기서 돈다** (미국 계획 D18). 이벤트 `sdc_daily_us`, 래퍼 `bin/us-daily.sh`, 볼륨 `/home/whi/data/stock_data:/stock_data`.
   이미지에 **`dolt` 2.3.5**가 들어갔다 (1.32GB → 1.43GB) — 미국 가격·IV/HV 원천이다.
 
@@ -116,6 +117,7 @@ flowchart TD
 | `sdc_daily_opendart_share_info` | chain-only | `sdc_daily_opendart_xbrl` | `dart-sync-share-info.sh` | 주식수, 배당, 자기주식 관련 OpenDART 데이터를 증분 동기화한다. Cronicle script에 `DART_SHARE_INFO_MAX_ATTEMPT_TARGETS=35000` override가 있다. |
 | `sdc_daily_opendart_xbrl` | chain-only | 없음 | `dart-sync-xbrl.sh` | OpenDART XBRL 데이터를 증분 동기화한다. 기본 attempt guard는 10,000건이다. |
 | **`sdc_daily_us`** | **daily 15:00** | 없음 | **`us-daily.sh`** | **미국 raw를 하루치 받는다** (미국 계획 C8). 원천 일곱(dolt·Nasdaq 실적·FINRA regsho·FINRA 잔고·SEC 벌크·SEC 분기·FRED/Wikipedia)을 한 명령이 순서대로 본다. **평일이 아니라 매일이다** — 할 일을 일정이 아니라 `raw/`에 무엇이 있나로 만들어서 주말 실행이 거의 공짜고, 주 1회짜리 SEC 벌크 3GB에 조용한 슬롯을 준다. `catch_up=0`인 이유도 같다: 잡 자체가 마지막으로 받은 것부터 어제까지 메꾼다. |
+| **`sdc_daily_us_derive`** | **Sunday 16:00** | 없음 | **`us-derive.sh`** | **미국 raw를 derived 스냅샷으로 굳힌다** (미국 계획 05 §4.1). **아직 Cronicle에 안 걸었다** (2026-09-21) — 래퍼와 명령만 있다. `sdc_daily_us`는 raw만 받아서 `dolt pull`은 매일 도는데 `prices_daily` 스냅샷이 2026-09-09에 멈춰 있었다. **무엇을 굳힐지는 일정이 아니라 입력이 정한다** — dolt는 커밋 해시, 나머지는 `raw/` mtime을 스냅샷과 비교한다. 그래서 주 1회로 걸어도 분기짜리 SEC 표는 분기에 한 번만 쌓인다. 회당 약 1.5GB다. 락 도메인이 `us`라 15:00 수집과 겹치지 않는다. **유니버스는 여기 없다** — 월 1회라 `us-universe rebuild`가 따로 한다 (03 §5.3). |
 
 ## Wrapper와 lock/throttle
 

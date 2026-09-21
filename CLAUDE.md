@@ -92,8 +92,10 @@ uv run collector --help
 
 | | |
 |---|---|
-| **명령** | `us-daily run`(하루치) · `us-load <table>` · `us-calendar build` · `us-universe rebuild` · `us-prune` |
+| **명령** | `us-daily run`(raw 하루치) · **`us-derive run`(raw→derived, 주 1회)** · `us-load <table>` · `us-calendar build` · `us-universe rebuild` · `us-prune` |
 | **한 줄로 돈다** | 할 일을 일정이 아니라 **`raw/`에 무엇이 있나**로 만든다. backfill과 상시 운영이 같은 함수를 쓴다 |
+| **`us-daily`는 raw만 받는다** | 굳히는 것은 **`us-derive`가 따로 한다.** 2026-09-21까지 그 자리가 없어서 `dolt pull`은 매일 도는데 `prices_daily` 스냅샷이 2026-09-09에 멈춰 있었다 |
+| **무엇을 굳힐지는 입력이 정한다** | dolt는 커밋 해시(`source_rev`), 나머지는 `raw/` mtime을 스냅샷과 비교한다. 굳히는 법과 판단 근거는 전부 `us/ops/derive.py`의 `RECIPES`에 있다 — `us-load` 목록도 거기서 나온다 |
 | **`dolt`가 이미지에 있다** | 2.3.5. 미국 가격·IV/HV 원천이다. 없으면 `us-daily`가 첫 원천에서 멈춘다 |
 | **레이크 정본은 서버다** | `/home/whi/data/stock_data/us`. 맥은 `deploy/local/us-mirror.sh`로 당겨 읽는다 |
 | **태그를 밀면 두 시장이 같이 나간다** | `v0.15.0`부터 미국 코드가 prod 이미지에 들어 있다. 태그 전에 `env -i ... collector --help`를 본다 |
