@@ -45,3 +45,6 @@ logs/
 /data/
 /data_lake/
 .tmp/
+
+# Rust 빌드 산출물 (raw-parquet-exporter). 455MB 라 커밋하지 않는다
+tools/raw-parquet-exporter/target/
