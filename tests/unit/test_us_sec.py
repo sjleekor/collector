@@ -241,6 +241,162 @@ def test_midas_dedup_rule_keeps_the_fuller_row():
     ]
 
 
+# --- 안 쓰던 12개 칸 (07_midas_unused_columns.md §8) --------------------------
+
+_MIDAS_HEADER = (
+    "Date,Security,Ticker,McapRank,TurnRank,VolatilityRank,PriceRank,"
+    "LitVol('000),OrderVol('000),Hidden,TradesForHidden,HiddenVol('000),"
+    "TradeVolForHidden('000),Cancels,LitTrades,OddLots,TradesForOddLots,"
+    "OddLotVol('000),TradeVolForOddLots('000)"
+)
+
+
+def _midas_zip(path, *, tag="2018q3", rows):
+    """MIDAS 분기 zip 하나를 흉내 낸다. 19컬럼 헤더 그대로(실제 zip 확인 완료)."""
+    year, q = int(tag[:4]), int(tag[5])
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr(f"q{q}_{year}_all.csv", "\n".join([_MIDAS_HEADER, *rows]) + "\n")
+
+
+def test_midas_schema_has_21_columns_and_old_four_ranks_keep_their_type():
+    """스키마 계약 — 12개를 더해도 기존 순위 넷의 이름·자료형은 안 바뀐다."""
+    import pyarrow as pyar
+
+    from collector.us.store.schema import MIDAS_SECURITY_DAILY_ARROW as schema
+
+    assert schema.names == [
+        "date",
+        "ticker",
+        "security_type",
+        "mcap_rank",
+        "turn_rank",
+        "volatility_rank",
+        "price_rank",
+        "lit_vol_k",
+        "order_vol_k",
+        "hidden",
+        "trades_for_hidden",
+        "hidden_vol_k",
+        "trade_vol_for_hidden_k",
+        "cancels",
+        "lit_trades",
+        "odd_lots",
+        "trades_for_odd_lots",
+        "odd_lot_vol_k",
+        "trade_vol_for_odd_lots_k",
+        "observed_at",
+        "source_rev",
+    ]
+    for name in ("mcap_rank", "turn_rank", "volatility_rank", "price_rank"):
+        assert schema.field(name).type == pyar.int32()
+    # ('000) 칸 — 천 단위 원값 그대로 DOUBLE. ×1000 해서 int로 바꾸지 않는다
+    for name in (
+        "lit_vol_k",
+        "order_vol_k",
+        "hidden_vol_k",
+        "trade_vol_for_hidden_k",
+        "odd_lot_vol_k",
+        "trade_vol_for_odd_lots_k",
+    ):
+        assert schema.field(name).type == pyar.float64()
+    # 이미 건수(count)인 여섯 칸 — 단위 접미사가 없다
+    for name in (
+        "hidden",
+        "trades_for_hidden",
+        "cancels",
+        "lit_trades",
+        "odd_lots",
+        "trades_for_odd_lots",
+    ):
+        assert schema.field(name).type == pyar.int64()
+
+
+def test_extract_midas_reads_the_twelve_extra_columns(tmp_path):
+    """07_midas_unused_columns.md §8 — 순위 넷 말고 12개도 뽑는다. 단위·음수 보존."""
+    import datetime as dt
+
+    import duckdb
+
+    from collector.lake import DataRoot
+
+    root = DataRoot(tmp_path)
+    dest = sec.quarterly_path(root, "midas", 2018, 3)
+    dest.parent.mkdir(parents=True)
+    rows = [
+        # 2018q3.zip 실물 첫 데이터 행 그대로 (2026-09-23 스모크 확인)
+        "20180702,Stock,A,10.0,5.0,1.0,9.0,822.3989999999999,17418.978000000003,"
+        "923.0,10443.0,95.113,917.512,129703.0,9485.0,3614.0,10398.0,146.449,"
+        "913.5569999999999",
+        # Hidden·HiddenVol 음수 — SEC 정의(SIP 체결 - 직접피드 체결)가 드물게
+        # 내는 값이다(§8.1). 버리거나 0으로 바뀌면 안 된다
+        "20180809,Stock,XPL,3.0,4.0,2.0,5.0,10.5,20.25,-1.0,50.0,-0.2,10.123,"
+        "100,200.0,5.0,6,1.111,2.222",
+    ]
+    _midas_zip(dest, tag="2018q3", rows=rows)
+
+    r = sec.extract_midas(root, snapshot_date=dt.date(2026, 1, 1))
+    assert r["quarters"] == 1
+    assert r["rows"] == 2
+
+    con = duckdb.connect()
+    cols = (
+        "ticker, mcap_rank, turn_rank, volatility_rank, price_rank, "
+        "lit_vol_k, order_vol_k, hidden, trades_for_hidden, hidden_vol_k, "
+        "trade_vol_for_hidden_k, cancels, lit_trades, odd_lots, "
+        "trades_for_odd_lots, odd_lot_vol_k, trade_vol_for_odd_lots_k"
+    )
+    rows_out = {
+        row[0]: row for row in con.execute(f"SELECT {cols} FROM '{r['path']}'").fetchall()
+    }
+
+    a = rows_out["A"]
+    # 기존 순위 넷 — 값이 그대로다 (회귀 확인)
+    assert a[1:5] == (10, 5, 1, 9)
+    # ('000) 칸은 원값(천 단위) 그대로다. ×1000 해서 주식 수로 바꾸지 않는다
+    assert a[5] == pytest.approx(822.3989999999999)
+    assert a[6] == pytest.approx(17418.978000000003)
+    # 이미 건수인 칸 — 소수점이 있는 원문도 정수로 온다
+    assert a[11] == 129703  # cancels
+    assert a[12] == 9485  # lit_trades
+
+    xpl = rows_out["XPL"]
+    assert xpl[7] == -1  # hidden — 음수를 그대로 저장한다
+    assert xpl[9] == pytest.approx(-0.2)  # hidden_vol_k — 마찬가지
+
+
+def test_extract_midas_dedup_keeps_the_fuller_rank_row_for_new_columns_too(tmp_path):
+    """12칸을 더해도 dedup 규칙은 그대로다 — 순위 넷이 다 찬 행이 이긴다 (03 §4.8)."""
+    import datetime as dt
+
+    import duckdb
+
+    from collector.lake import DataRoot
+
+    root = DataRoot(tmp_path)
+    dest = sec.quarterly_path(root, "midas", 2018, 3)
+    dest.parent.mkdir(parents=True)
+    rows = [
+        # 순위 넷이 다 찼다 — 이 행이 이긴다
+        "20180716,Stock,SPB,8.0,10.0,9.0,9.0,1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0,"
+        "9.0,10.0,11.0,12.0",
+        # VolatilityRank 만 있다 — 실측 패턴 그대로, 진다
+        "20180716,Stock,SPB,,,9.0,,100.0,200.0,300.0,400.0,500.0,600.0,700.0,"
+        "800.0,900.0,1000.0,1100.0,1200.0",
+    ]
+    _midas_zip(dest, tag="2018q3", rows=rows)
+
+    r = sec.extract_midas(root, snapshot_date=dt.date(2026, 1, 1))
+    assert r["rows"] == 1  # 하나는 접혔다
+    assert r["deduped_rows"] == 1
+
+    con = duckdb.connect()
+    row = con.execute(
+        f"SELECT mcap_rank, lit_vol_k, trade_vol_for_odd_lots_k FROM '{r['path']}'"
+    ).fetchone()
+    # 이긴 행(순위 넷이 다 찬 행)의 12칸 값이지, 진 행의 값이 아니다
+    assert row == (8, 1.0, 12.0)
+
+
 # --- 내부자 거래 (03 §4.10) ---------------------------------------------------
 
 

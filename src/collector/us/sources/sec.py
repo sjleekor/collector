@@ -346,7 +346,13 @@ def extract_midas(
 ) -> dict[str, object]:
     """분기 MIDAS CSV들을 ``midas_security_daily`` 한 장으로 (03 §4.8).
 
-    순위 넷만 뽑는다. rank 값이 연도마다 ``"1"``/``"1.0"``으로 와서 숫자로 파싱한다.
+    순위 넷과, 2026-09-23 조사(``07_midas_unused_columns.md`` §8)로 "쓸 수
+    있다"고 판정된 나머지 12개 호가 미시구조 지표를 뽑는다. rank·건수 값이
+    연도마다 ``"1"``/``"1.0"``으로 와서 숫자로 파싱한다.
+
+    ``('000)`` 칸은 원천 값(천 단위)을 그대로 저장한다 — ×1000 하지 않는다
+    (``schema.py`` 주석 참고). ``Hidden``·``HiddenVol('000)``의 음수는
+    SEC 정의(SIP 체결 − 직접피드 체결)에서 나오는 값이라 그대로 둔다.
     """
     import datetime as _dt
 
@@ -378,6 +384,25 @@ def extract_midas(
                        CAST(TRY_CAST("TurnRank"       AS DOUBLE) AS INTEGER) AS turn_rank,
                        CAST(TRY_CAST("VolatilityRank" AS DOUBLE) AS INTEGER) AS volatility_rank,
                        CAST(TRY_CAST("PriceRank"      AS DOUBLE) AS INTEGER) AS price_rank,
+                       -- 나머지 12개 (07_midas_unused_columns.md §8). ('000) 칸은
+                       -- 천 단위 원값 그대로 DOUBLE 로 둔다 — ×1000 하지 않는다.
+                       -- 건수 칸도 "129703.0" 처럼 소수점이 섞여 와 같은 방식으로 받는다.
+                       TRY_CAST("LitVol('000)"                AS DOUBLE) AS lit_vol_k,
+                       TRY_CAST("OrderVol('000)"               AS DOUBLE) AS order_vol_k,
+                       CAST(TRY_CAST("Hidden"                  AS DOUBLE) AS BIGINT) AS hidden,
+                       CAST(TRY_CAST("TradesForHidden"         AS DOUBLE) AS BIGINT)
+                           AS trades_for_hidden,
+                       TRY_CAST("HiddenVol('000)"              AS DOUBLE) AS hidden_vol_k,
+                       TRY_CAST("TradeVolForHidden('000)"      AS DOUBLE)
+                           AS trade_vol_for_hidden_k,
+                       CAST(TRY_CAST("Cancels"                 AS DOUBLE) AS BIGINT) AS cancels,
+                       CAST(TRY_CAST("LitTrades"               AS DOUBLE) AS BIGINT) AS lit_trades,
+                       CAST(TRY_CAST("OddLots"                 AS DOUBLE) AS BIGINT) AS odd_lots,
+                       CAST(TRY_CAST("TradesForOddLots"        AS DOUBLE) AS BIGINT)
+                           AS trades_for_odd_lots,
+                       TRY_CAST("OddLotVol('000)"              AS DOUBLE) AS odd_lot_vol_k,
+                       TRY_CAST("TradeVolForOddLots('000)"     AS DOUBLE)
+                           AS trade_vol_for_odd_lots_k,
                        CAST(? AS TIMESTAMP WITH TIME ZONE)             AS observed_at,
                        CAST(? AS VARCHAR)                              AS source_rev
                 FROM read_csv('{tmp}', header=true, all_varchar=true)

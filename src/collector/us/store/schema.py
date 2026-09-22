@@ -226,9 +226,29 @@ FILINGS_SUB_ARROW = pyar.schema(
 )
 
 
-# --- midas_security_daily (03 §4.8) ------------------------------------------
-# 19컬럼 중 순위 넷만. 나머지 호가 미시구조 지표는 raw/ 에 두고 안 뽑는다.
-# rank 값 형식이 연도마다 "1" / "1.0" 으로 달라 숫자로 파싱한다.
+# --- midas_security_daily (03 §4.8, 07_midas_unused_columns.md §8) -----------
+# 19컬럼 중 처음엔 순위 넷만 뽑았다. 나머지 12개(호가 미시구조 지표)는
+# 2026-09-23 조사로 "쓸 수 있다"고 판정돼 여기서 더한다 — 새로 받을 것은
+# 없다, 이미 raw/ 에 있는 619MB 안에서 뽑는다.
+# rank 값 형식이 연도마다 "1" / "1.0" 으로 달라 숫자로 파싱한다. 12개 칸도
+# Cancels 처럼 같은 흔들림이 있다("143073" vs "129703.0", 2026-09-23 스모크
+# 확인) — 같은 방식(DOUBLE로 받고 내림)으로 다룬다.
+#
+# **``('000)`` 칸은 원천 값(천 단위)을 그대로 두고 칸 이름에 ``_k``를 붙인다.**
+# ×1000 해서 주식 수로 바꾸지 않는다 — 원시값과 이벤트만 저장하고 조정은
+# 읽을 때 계산한다는 원칙(03 §1, ``90_collection_design`` §2)을 단위 변환에도
+# 그대로 적용한다. 원천 자체가 이미 부동소수점 잡음을 갖고 있어서
+# (예: ``LitVol('000)`` 원문이 ``822.3989999999999``) DOUBLE로 받는 것이
+# 원문을 제일 그대로 옮기는 방법이다 — DECIMAL로 반올림하면 원문에 없던
+# 정밀도를 만들게 된다.
+#
+# **``Hidden``·``HiddenVol('000)``은 음수가 나올 수 있다.** SEC 정의가
+# ``SIP 체결 − 직접피드 체결``이라 두 피드의 타이밍 불일치로 드물게(0.001%
+# 미만) 음수가 난다 — 결함이 아니라 정의가 그렇다. 버리거나 0으로 바꾸지
+# 않는다.
+#
+# 나머지 여섯 칸(``Cancels``·``LitTrades``·``Hidden``·``TradesForHidden``·
+# ``OddLots``·``TradesForOddLots``)은 이미 건수(count)라 단위 접미사가 없다.
 
 MIDAS_SECURITY_DAILY_ARROW = pyar.schema(
     [
@@ -239,6 +259,18 @@ MIDAS_SECURITY_DAILY_ARROW = pyar.schema(
         ("turn_rank", pyar.int32()),
         ("volatility_rank", pyar.int32()),
         ("price_rank", pyar.int32()),
+        ("lit_vol_k", pyar.float64()),  # LitVol('000). Trades - Hidden 체결량
+        ("order_vol_k", pyar.float64()),  # OrderVol('000). add order 주문량 합
+        ("hidden", pyar.int64()),  # Hidden. 숨은 주문 체결 건수. 음수 가능
+        ("trades_for_hidden", pyar.int64()),  # TradesForHidden. Hidden Rate 분모
+        ("hidden_vol_k", pyar.float64()),  # HiddenVol('000). 음수 가능
+        ("trade_vol_for_hidden_k", pyar.float64()),  # TradeVolForHidden('000)
+        ("cancels", pyar.int64()),  # Cancels. 전체·부분 취소 메시지 건수
+        ("lit_trades", pyar.int64()),  # LitTrades. Trades - Hidden 체결 건수
+        ("odd_lots", pyar.int64()),  # OddLots. 소량(oddlot) 체결 건수
+        ("trades_for_odd_lots", pyar.int64()),  # TradesForOddLots. Oddlot Rate 분모
+        ("odd_lot_vol_k", pyar.float64()),  # OddLotVol('000)
+        ("trade_vol_for_odd_lots_k", pyar.float64()),  # TradeVolForOddLots('000)
         ("observed_at", pyar.timestamp("us", tz="UTC")),
         ("source_rev", pyar.string()),
     ]
