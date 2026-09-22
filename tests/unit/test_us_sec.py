@@ -147,6 +147,49 @@ def test_quarterly_path_rejects_unknown_kind(tmp_path):
         sec.quarterly_path(DataRoot(tmp_path), "nope", 2018, 4)
 
 
+# --- 분기 추출의 끝은 raw/ 가 정한다 (2026-09-23) ----------------------------
+#
+# 예전엔 세 추출 함수의 끝이 ``quarters((2018, 3), (2026, 2))``로 박혀 있어
+# 2026q3 zip을 받아도 레이크에 안 들어갔다.
+
+
+def test_latest_available_quarter_finds_the_max_present(tmp_path):
+    from collector.lake import DataRoot
+
+    root = DataRoot(tmp_path)
+    for y, q in [(2018, 3), (2019, 1), (2026, 3)]:
+        p = sec.quarterly_path(root, "midas", y, q)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"PK\x03\x04")
+    assert sec.latest_available_quarter(root, "midas") == (2026, 3)
+
+
+def test_latest_available_quarter_ignores_names_that_dont_match(tmp_path):
+    """분기 zip이 아닌 파일(``.part`` 등)은 안 센다."""
+    from collector.lake import DataRoot
+
+    root = DataRoot(tmp_path)
+    p = sec.quarterly_path(root, "midas", 2018, 3)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(b"PK\x03\x04")
+    (p.parent / "2099q9.zip").write_bytes(b"PK\x03\x04")  # 분기가 아니다(q9)
+    (p.parent / "2026q3.zip.part").write_bytes(b"x")  # 아직 다 안 받았다
+    assert sec.latest_available_quarter(root, "midas") == (2018, 3)
+
+
+def test_latest_available_quarter_is_none_when_raw_is_empty(tmp_path):
+    from collector.lake import DataRoot
+
+    assert sec.latest_available_quarter(DataRoot(tmp_path), "midas") is None
+
+
+def test_latest_available_quarter_rejects_unknown_kind(tmp_path):
+    from collector.lake import DataRoot
+
+    with pytest.raises(ValueError, match="모르는 갈래"):
+        sec.latest_available_quarter(DataRoot(tmp_path), "nope")
+
+
 def _zip_bytes():
     import io as _io
 
@@ -362,6 +405,40 @@ def test_extract_midas_reads_the_twelve_extra_columns(tmp_path):
     xpl = rows_out["XPL"]
     assert xpl[7] == -1  # hidden — 음수를 그대로 저장한다
     assert xpl[9] == pytest.approx(-0.2)  # hidden_vol_k — 마찬가지
+
+
+def test_extract_midas_picks_up_a_quarter_past_the_old_frozen_end(tmp_path):
+    """raw/ 에 2026q3 zip이 있으면 대상에 들어간다 — 끝이 raw/ 최신 분기다.
+
+    예전엔 ``quarters((2018, 3), (2026, 2))``로 끝이 박혀 있어 2026q3 zip을
+    받아도 레이크에 안 들어갔다 (2026-09-23). 사이 분기(2018q4\\~2026q2)는
+    안 받아 뒀으니 ``missing`` 으로 그대로 잡혀야 한다 — 지금 동작을 유지한다.
+    """
+    import datetime as dt
+
+    from collector.lake import DataRoot
+
+    root = DataRoot(tmp_path)
+    row_2018 = (
+        "20180702,Stock,A,10.0,5.0,1.0,9.0,822.3989999999999,17418.978000000003,"
+        "923.0,10443.0,95.113,917.512,129703.0,9485.0,3614.0,10398.0,146.449,"
+        "913.5569999999999"
+    )
+    row_2026 = (
+        "20260715,Stock,B,11.0,6.0,2.0,8.0,1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0,9.0," "10.0,11.0,12.0"
+    )
+    for y, q, tag, row in ((2018, 3, "2018q3", row_2018), (2026, 3, "2026q3", row_2026)):
+        p = sec.quarterly_path(root, "midas", y, q)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        _midas_zip(p, tag=tag, rows=[row])
+
+    r = sec.extract_midas(root, snapshot_date=dt.date(2026, 1, 1))
+
+    assert r["quarters"] == 2  # 2018q3 + 2026q3 만 실제로 받아 뒀다
+    assert r["rows"] == 2
+    assert "2026q3" not in r["missing"]  # 끝이 여기까지 늘어났다
+    assert "2026q2" in r["missing"]  # 사이 분기는 여전히 missing 이다
+    assert "2019q1" in r["missing"]
 
 
 def test_extract_midas_dedup_keeps_the_fuller_rank_row_for_new_columns_too(tmp_path):

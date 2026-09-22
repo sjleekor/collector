@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 import zipfile
 from dataclasses import dataclass, field
@@ -214,6 +215,34 @@ def quarterly_path(root: DataRoot, kind: str, year: int, quarter: int) -> Path:
     return root.raw / "sec" / "quarterly" / kind / f"{year}q{quarter}.zip"
 
 
+#: ``latest_available_quarter``가 ``raw/`` 파일명을 파싱하는 정규식.
+_QUARTER_ZIP_NAME = re.compile(r"^(\d{4})q([1-4])\.zip$")
+
+
+def latest_available_quarter(root: DataRoot, kind: str) -> tuple[int, int] | None:
+    """``raw/``에 실제로 받아 둔 ``kind`` 분기 ZIP 중 가장 최근 것.
+
+    ``extract_filings_sub``·``extract_midas``·``extract_insider``의 끝은
+    여기서 정한다. 예전에는 ``quarters((2018, 3), (2026, 2))``처럼 함수
+    **본문**에 끝 분기가 튜플 리터럴로 박혀 있었다 — 매개변수 기본값이 아니라
+    호출부라 ``test_us_no_frozen_dates.py``가 못 잡았다. 2026q3 zip을 받아도
+    레이크에 안 들어가던 원인이다 (2026-09-23).
+
+    받아 둔 zip이 하나도 없으면 ``None``.
+    """
+    if kind not in QUARTERLY_KINDS:
+        raise ValueError(f"모르는 갈래: {kind!r} (있는 것: {sorted(QUARTERLY_KINDS)})")
+    directory = root.raw / "sec" / "quarterly" / kind
+    if not directory.is_dir():
+        return None
+    found = [
+        (int(m.group(1)), int(m.group(2)))
+        for m in (_QUARTER_ZIP_NAME.match(p.name) for p in directory.iterdir())
+        if m
+    ]
+    return max(found) if found else None
+
+
 def download_quarterly(
     client: SecClient,
     root: DataRoot,
@@ -287,7 +316,15 @@ def extract_filings_sub(
     con = duckdb.connect()
     parts, missing = [], []
 
-    for y, q in quarters((2018, 3), (2026, 2)):
+    # 시작은 확정 구간 근거가 있는 고정값이다(검정 구간이 2018-09-07부터라
+    # 그 앞은 받을 이유가 없다). **끝은 raw/ 에 실제로 있는 분기에서 정한다**
+    # (latest_available_quarter) — 튜플 리터럴로 박으면 새 분기 zip을 받아도
+    # 레이크에 안 들어간다 (2026-09-23, extract_midas와 같은 결함).
+    end = latest_available_quarter(root, "financial")
+    if end is None:
+        raise SecAccessError("분기 재무 ZIP이 하나도 없다. 먼저 받는다.")
+
+    for y, q in quarters((2018, 3), end):
         zp = quarterly_path(root, "financial", y, q)
         if not zp.is_file():
             missing.append(f"{y}q{q}")
@@ -366,7 +403,17 @@ def extract_midas(
     con = duckdb.connect()
     parts, missing = [], []
 
-    for y, q in quarters((2018, 3), (2026, 2)):
+    # 시작 (2018, 3)은 확정 구간 근거가 있는 고정값이다 — 검정 구간이
+    # 2018-09-07부터라 그 앞은 받을 이유가 없다. **끝은 raw/ 에 실제로 있는
+    # 분기 zip에서 정한다** (latest_available_quarter). 예전에는 여기가
+    # ``quarters((2018, 3), (2026, 2))``로 박혀 있었다 — 2026q3 zip을 받아도
+    # 레이크에 안 들어가던 원인이다 (2026-09-23). 매개변수 기본값이 아니라
+    # 함수 본문의 튜플 리터럴이라 ``test_us_no_frozen_dates.py``도 못 잡았다.
+    end = latest_available_quarter(root, "midas")
+    if end is None:
+        raise SecAccessError("MIDAS ZIP이 하나도 없다. 먼저 받는다.")
+
+    for y, q in quarters((2018, 3), end):
         zp = quarterly_path(root, "midas", y, q)
         if not zp.is_file():
             missing.append(f"{y}q{q}")
@@ -528,7 +575,14 @@ def extract_insider(
     trans_parts, owner_parts, missing = [], [], []
     unmatched = 0
 
-    for y, q in quarters((2018, 3), (2026, 2)):
+    # 시작은 확정 구간 근거가 있는 고정값이다. **끝은 raw/ 에 실제로 있는
+    # 분기에서 정한다** (latest_available_quarter) — extract_midas와 같은
+    # 결함이었다 (2026-09-23).
+    end = latest_available_quarter(root, "insider")
+    if end is None:
+        raise SecAccessError("내부자 ZIP이 하나도 없다. 먼저 받는다.")
+
+    for y, q in quarters((2018, 3), end):
         zp = quarterly_path(root, "insider", y, q)
         if not zp.is_file():
             missing.append(f"{y}q{q}")

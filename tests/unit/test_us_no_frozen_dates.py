@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import ast
 import datetime as dt
 import importlib
 import inspect
@@ -88,6 +89,70 @@ def test_allowlist_has_no_stale_entries():
         for p in inspect.signature(fn).parameters
     }
     assert not _ALLOWED - live
+
+
+# --- 네 번째: 기본값이 아니라 호출부에 박힌 끝 -----------------------------
+#
+# 위 검사는 함수 **기본값**만 본다. SEC 분기 추출 함수 셋
+# (``extract_filings_sub``·``extract_midas``·``extract_insider``)은 끝 분기가
+# 함수 **본문**에 ``quarters((2018, 3), (2026, 2))``처럼 튜플 리터럴로 박혀
+# 있었다 — 매개변수 기본값이 아니라 호출부라 위 검사로는 못 잡았다. 2026q3
+# zip을 받아도 레이크에 안 들어가던 원인이었다 (2026-09-23).
+
+
+def _quarters_call_sites():
+    """``quarters(시작, 끝)`` 호출부를 소스에서 찾아 ``끝`` 인자 노드를 낸다."""
+    for mod in pkgutil.walk_packages(collector.us.__path__, "collector.us."):
+        module = importlib.import_module(mod.name)
+        source_file = module.__file__
+        if not source_file:
+            continue
+        tree = ast.parse(open(source_file, encoding="utf-8").read(), filename=source_file)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or len(node.args) < 2:
+                continue
+            func = node.func
+            name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+            if name == "quarters":
+                yield mod.name, node.lineno, node.args[1]
+
+
+def _literal_int_pair(node: ast.AST) -> tuple[int, int] | None:
+    """``(2026, 2)``처럼 정수 둘짜리 튜플 리터럴이면 값을, 아니면 ``None``."""
+    if not (isinstance(node, ast.Tuple) and len(node.elts) == 2):
+        return None
+    values: list[int] = []
+    for elt in node.elts:
+        if isinstance(elt, ast.Constant) and isinstance(elt.value, int):
+            values.append(elt.value)
+        else:
+            return None
+    return (values[0], values[1])
+
+
+#: ``quarters(시작, 끝)`` 호출부에서 끝이 튜플 리터럴이어도 되는 자리.
+#: 지금은 없다 — 끝은 항상 ``latest_available_quarter``(raw/) 나 오늘짜로
+#: 계산한 변수(예: ``_last_closed_quarter``)에서 나와야 한다.
+_ALLOWED_QUARTER_CALL_ENDS: frozenset[tuple[str, int]] = frozenset()
+
+
+def test_no_quarters_call_freezes_an_end_literal():
+    """``quarters(시작, (연도, 분기))``처럼 끝이 튜플 리터럴로 박힌 호출이 없다.
+
+    시작이 튜플 리터럴인 것은 상관없다 — 시작점은 과거 사실이라 박아도 된다
+    (``_ALLOWED``와 같은 원칙). 문제는 **끝**이 리터럴일 때다.
+    """
+    frozen = []
+    for mod_name, lineno, end_node in _quarters_call_sites():
+        end = _literal_int_pair(end_node)
+        if end is None or (mod_name, lineno) in _ALLOWED_QUARTER_CALL_ENDS:
+            continue
+        frozen.append(f"{mod_name}:{lineno} quarters(..., end={end!r})")
+    frozen.sort()
+    assert not frozen, (
+        "quarters() 호출의 끝이 튜플 리터럴로 박혀 있다. raw/ 에 실제로 있는 "
+        "분기(latest_available_quarter)나 오늘짜로 계산한 변수로 정하라:\n  " + "\n  ".join(frozen)
+    )
 
 
 # --- 고친 자리가 실제로 어떻게 도나 ---------------------------------------
