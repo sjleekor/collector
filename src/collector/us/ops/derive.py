@@ -113,6 +113,14 @@ RECIPES: dict[str, Recipe] = {
         ("listing_snapshots",),
         raw_inputs=("wayback/symdir",),
     ),
+    # 한 로더가 표 둘을 낸다 — `submissions`(`filings_index`·`company_meta`)와
+    # 같은 모양이다. `ftd_fails`가 앞이라 `needs_rebuild`가 그 스냅샷 mtime을
+    # 본다 — `cusip_symbol_pit`는 그 스냅샷에서 파생하므로 같이 굳는다.
+    "ftd": Recipe(
+        "collector.us.sources.sec_ftd:extract_ftd",
+        ("ftd_fails", "cusip_symbol_pit"),
+        raw_inputs=("sec/ftd",),
+    ),
     # **원천이 없는 표다.** `exchange_calendars` 가 주는데, 그 라이브러리가
     # 대략 오늘+1년까지만 세션을 만든다. 한 번 굳히고 두면 그 날짜에 하루
     # 실행이 조용히 멈춘다 — 옛 기본값 `end="2026-12-31"` 이 2027-01-01 에

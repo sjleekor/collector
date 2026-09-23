@@ -277,6 +277,55 @@ MIDAS_SECURITY_DAILY_ARROW = pyar.schema(
 )
 
 
+# --- ftd_fails (01_sec_ftd.md) -----------------------------------------------
+# SEC 반월 CNS Fails-to-Deliver 원문을 정규화한 것. **`settlement_date`는 결제일이지
+# 거래일이 아니다** — 결제 주기가 T+2에서 T+1로 바뀌었어도 이 표에는 단서가 없다
+# (01 §2). `price`는 그 **결제일 직전 거래일**의 종가라 그 자체로는 어느 거래일
+# 거래에서 나온 값인지 못 센다 — 참고값이지 1차 가격 계열이 아니다. 그래서
+# `prices_daily`(decimal128)와 달리 float64로 둔다. 빈 값이 "." 로 온다(01 §2.1).
+#
+# 파일 끝에 붙는 Trailer 두 줄(행 수·총 주식 수)은 `settlement_date`가 8자리
+# 숫자가 아니라서 여기 안 들어온다 — `sources/sec_ftd.py`의 파서가 그 칸으로 가른다.
+
+FTD_FAILS_ARROW = pyar.schema(
+    [
+        ("settlement_date", pyar.date32()),
+        ("cusip", pyar.string()),
+        ("symbol", pyar.string()),
+        ("quantity", pyar.int64()),  # QUANTITY (FAILS). 그날 미결제 실패 주식 수
+        ("description", pyar.string()),
+        ("price", pyar.float64()),  # 결제일 직전 거래일 종가. 빈 값은 null (01 §2.1)
+        ("observed_at", pyar.timestamp("us", tz="UTC")),
+        ("source_rev", pyar.string()),  # 반월 태그 (예: 202608b)
+    ]
+)
+
+
+# --- cusip_symbol_pit (01_sec_ftd.md §6, 02_sec_13f.md §6) -------------------
+# FTD 로 만든 CUSIP<->심볼 PIT 맵. 13F(``INFOTABLE``의 CUSIP)를 유니버스 심볼에
+# 붙이는 다리다. **일대일이 아니다** — CUSIP 하나에 심볼이 여럿(티커 변경)이거나
+# 심볼 하나에 CUSIP 이 여럿(합병·재상장·액면병합)이다(01 §6.1). 그래서 맵은
+# `(CUSIP) -> 심볼`이 아니라 **`(CUSIP, 심볼)` 쌍마다 관측 구간**을 남긴다.
+#
+# `first_seen`·`last_seen`은 그 쌍이 실제로 나타난 결제일의 최소·최대다. 오늘자
+# 맵 한 벌로 과거를 매기지 않는다 — FTD는 반월마다 결제일을 주므로 이 표 자체가
+# PIT다. 쓰는 쪽은 `first_seen <= 기준일 <= last_seen` 또는
+# `universe/build.py`의 `TICKER_PIT_JOIN`과 같은 ASOF 조인으로 기준일에 맞는
+# 쌍을 고른다.
+
+CUSIP_SYMBOL_PIT_ARROW = pyar.schema(
+    [
+        ("cusip", pyar.string()),
+        ("symbol", pyar.string()),
+        ("first_seen", pyar.date32()),
+        ("last_seen", pyar.date32()),
+        ("n_settlement_dates", pyar.int32()),  # 이 쌍이 나온 결제일 수
+        ("observed_at", pyar.timestamp("us", tz="UTC")),
+        ("source_rev", pyar.string()),  # ftd_fails 스냅샷에서 만들었다는 표시
+    ]
+)
+
+
 # --- listing_snapshots (03 §4.9) ---------------------------------------------
 # Wayback 이 뜬 nasdaqtrader 심볼 디렉터리. is_etf·test_issue 의 PIT 원천이다
 # (dolt symbol 은 PK가 act_symbol 하나뿐이라 오늘 값만 있다 — 03 §5.4).
@@ -534,6 +583,8 @@ ARROW_SCHEMAS: dict[str, pyar.Schema] = {
     "index_constituents": INDEX_CONSTITUENTS_ARROW,
     "short_volume": SHORT_VOLUME_ARROW,
     "earnings_calendar": EARNINGS_CALENDAR_ARROW,
+    "ftd_fails": FTD_FAILS_ARROW,
+    "cusip_symbol_pit": CUSIP_SYMBOL_PIT_ARROW,
 }
 
 FRAME_SCHEMAS: dict[str, pa.DataFrameSchema] = {

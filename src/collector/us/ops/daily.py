@@ -297,6 +297,47 @@ def _last_closed_quarter(today: dt.date) -> tuple[int, int]:
     return (today.year - 1, 4) if q == 1 else (today.year, q - 1)
 
 
+def run_sec_ftd(root: DataRoot, *, budget: _Budget, dry_run: bool = False) -> SourceRun:
+    """SEC 반월 Fails-to-Deliver. **목록 페이지를 매번 다시 읽는다** — 분기 ZIP과
+    달리 URL을 규칙으로 못 만든다(``sec_ftd.py`` 모듈 docstring, 경로가 네 가지).
+    새 반월이 올라왔는지는 목록 자체를 봐야 안다. 목록 페이지 요청 하나는
+    매일 더해도 무시할 만하다 — 새 원천 요청은 반월당 하나뿐이다
+    (연구 01_sec_ftd.md §8, 유지 비용 월 2요청).
+    """
+    from collector.us.sources import sec, sec_ftd
+
+    run = SourceRun("sec_ftd")
+    client = sec.SecClient(user_agent=sec.user_agent_from_env())
+    try:
+        listing = sec_ftd.list_ftd_files(client)
+    except (sec.SecAccessError, sec_ftd.FtdError) as exc:
+        run.missing.append(f"목록 페이지: {exc}")
+        run.ok = False
+        return run
+
+    have = sec_ftd.raw_periods(root)
+    todo = sorted(p for p in listing.files if p not in have)
+    run.skipped = len(listing.files) - len(todo)
+    run.pending = len(todo)
+    if listing.duplicates:
+        run.note = f"같은 반월에 링크가 둘 이상: {sorted(listing.duplicates)}"
+    if dry_run or not todo:
+        return run
+
+    for period in todo:
+        if budget.spent():
+            break
+        try:
+            sec_ftd.download_ftd(client, root, period, listing.files[period])
+        except sec.SecAccessError as exc:
+            run.missing.append(f"{period}: {exc}")
+            continue
+        run.fetched += 1
+    run.pending = len(todo) - run.fetched
+    run.ok = not run.missing
+    return run
+
+
 def run_weekly_macro(
     root: DataRoot, *, today: dt.date, snapshot_date: dt.date | str, dry_run: bool = False
 ) -> SourceRun:
@@ -347,6 +388,7 @@ SOURCES: tuple[str, ...] = (
     "finra_short_interest",
     "sec_bulk",
     "sec_quarterly",
+    "sec_ftd",
     "weekly_macro",
 )
 
@@ -389,6 +431,8 @@ def run_daily(
             runs.append(run_sec_bulk(root, today=today, dry_run=dry_run))
         elif name == "sec_quarterly":
             runs.append(run_sec_quarterly(root, today=today, dry_run=dry_run))
+        elif name == "sec_ftd":
+            runs.append(run_sec_ftd(root, budget=budget, dry_run=dry_run))
         elif name == "weekly_macro":
             runs.append(
                 run_weekly_macro(
