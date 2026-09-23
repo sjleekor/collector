@@ -129,8 +129,8 @@ flowchart TD
 | 항목 | 등록 값 | 이유 |
 |---|---|---|
 | Event id | `sdc_daily_us_nasdaq_analyst` | `sdc_daily_us_derive`처럼 실제로는 주 1회지만 기존 명명(`sdc_daily_*`)을 따른다 |
-| Timing | **Saturday 09:00 KST** | 한국 체인(Mon-Fri 18:30)·`sdc_daily_us`(매일 15:00)·`sdc_daily_us_derive`(일 16:00) 어느 것과도 겹치지 않는다. 토요일 09:00에 시작하면 예산(6시간) 안에 끝나도 일요일 16:00 derive보다 한참 먼저 끝나 그 주 데이터가 바로 derive에 들어간다 |
-| Wrapper | `bin/us-nasdaq-analyst.sh` | `us-nasdaq-analyst run --budget-seconds "$SDC_US_NASDAQ_ANALYST_BUDGET_SECONDS"` (기본 21600=6시간) |
+| Timing | **Saturday 09:00 KST** | 한국 체인(Mon-Fri 18:30)·`sdc_daily_us`(매일 15:00)·`sdc_daily_us_derive`(일 16:00) 어느 것과도 겹치지 않는다. 토요일 09:00에 시작하면 예산(8.5시간)을 다 써도 17:30에 끝나 일요일 16:00 derive에 그 주 데이터가 들어간다. 15:00 `sdc_daily_us`와 겹치지만 락 도메인도 원천 호스트도 다르다 |
+| Wrapper | `bin/us-nasdaq-analyst.sh` | `us-nasdaq-analyst run --budget-seconds "$SDC_US_NASDAQ_ANALYST_BUDGET_SECONDS"` (기본 30600=8.5시간. 처음 6시간은 첫 실행에서 모자랐다 — 아래) |
 | Lock domain | **`us_nasdaq_analyst` (자기 도메인, `us`와 다르다)** | 종목당 1요청이라 전체를 돌면 몇 시간이 걸린다(04 §4). `us` 도메인을 같이 쓰면 그동안 `sdc_daily_us`(15:00)·`sdc_daily_us_derive`가 lock 대기에서 막힌다. 건드리는 raw 하위 트리(`raw/nasdaq/analyst_earnings_forecast/`)도 겹치지 않아 같은 도메인일 이유가 없다 |
 | `catch_up` | `0` | 다른 미국 event와 같다. 잡 자체가 "이번 주 유니버스 중 아직 못 받은 심볼"로 할 일을 정하므로 놓친 주가 있어도 다음 실행이 자연히 이어받는다 |
 | `max_children` | `1` | 다른 미국 event와 같다 |
@@ -138,8 +138,11 @@ flowchart TD
 **남은 문제 — 예산을 넘기면 다음 주까지 기다린다.** `us-daily`/`us-derive`는
 매일 도는 래퍼가 내부에서 "주 1회면 충분"을 판단하므로 예산을 못 채워도 다음 날
 이어받는다. 이 잡은 **주 1회 트리거 자체**라서, 한 번의 실행이 예산 안에 유니버스
-전체를 못 끝내면 나머지는 **다음 토요일**까지 `pending`으로 남는다. 우리 유니버스가
-04 §4의 "전체 약 4,200종목" 어림보다 작아 6시간 예산으로 보통은 끝날 것으로 본다.
+전체를 못 끝내면 나머지는 **다음 토요일**까지 `pending`으로 남는다 — 그리고 다음
+토요일은 새 ISO 주 파티션이라 **그 주 몫은 영영 안 채워진다.** 순서가 알파벳이라
+**매주 같은 뒤쪽 종목이 빠진다.** 처음에는 6시간 예산으로 끝날 것으로 봤는데
+**첫 실행(2026-09-24)에서 틀렸다** — 유니버스 4,081종목 · 실측 종목당 약 6초라
+한 바퀴가 약 6.8시간이다. 그래서 기본 예산을 8.5시간으로 올렸다.
 운영자가 `pending > 0`을 job 출력에서 보면 같은 주 안에 손으로 다시 돌려도
 안전하다(이미 받은 심볼은 건너뛴다) — 필요하면 나중에 수요일 등에 가벼운 catch-up
 트리거를 하나 더 추가하는 것도 고려할 수 있다.

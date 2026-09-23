@@ -20,9 +20,13 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$script_dir/lib/sdc-wrapper.sh"
 
-# 6시간. 04 §4 어림(간격 5초 기준 한 바퀴 5.8시간)에 여유를 더했다 — 우리
-# 유니버스는 그 어림의 "전체 약 4,200종목"보다 작아 보통은 더 빨리 끝난다.
-BUDGET_SECONDS="${SDC_US_NASDAQ_ANALYST_BUDGET_SECONDS:-21600}"
+# 8.5시간. 처음에는 6시간이었는데 **첫 실행(2026-09-24)에서 모자랐다** —
+# 유니버스 4,081종목 · 실측 종목당 약 6초(간격 5초 + 응답)라 한 바퀴가 약
+# 6.8시간이다. 예산을 넘기면 남은 종목은 **그 주에 다시 못 받는다** — 다음
+# 토요일은 새 ISO 주 파티션이다. 그리고 순서가 알파벳이라 **매주 같은 뒤쪽
+# 종목이 빠진다.** 토 09:00 시작이면 17:30에 끝난다. 15:00 `sdc_daily_us` 와는
+# 락 도메인도 원천 호스트도 달라 겹쳐도 된다.
+BUDGET_SECONDS="${SDC_US_NASDAQ_ANALYST_BUDGET_SECONDS:-30600}"
 
 args=(us-nasdaq-analyst run --budget-seconds "$BUDGET_SECONDS")
 # 손으로 부를 때 `--dry-run`·`--symbols`·`--today` 등을 넘길 수 있어야 한다.
