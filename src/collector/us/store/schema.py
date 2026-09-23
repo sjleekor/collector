@@ -564,6 +564,47 @@ EARNINGS_CALENDAR_ARROW = pyar.schema(
 )
 
 
+# --- nasdaq_analyst_estimates (source_expansion 04·99 §3.4·§4 순번 4) --------
+# Nasdaq `analyst/{symbol}/earnings-forecast`. **전진 축적 전용이다** — 기준
+# 시각(`asOf`)이 없고, 같은 원천의 `historicalConsensus`도 13개월뿐이라 과거를
+# 복원할 길이 없다. 그래서 `observed_at`이 이 표의 유일한 PIT 축이고, **derive를
+# 돌린 시각이 아니라 그 심볼·주를 실제로 받은 시각**(raw JSON에 같이 적어 둔
+# `fetched_at`)을 담는다 — earnings_calendar 로더가 "지금"으로 두는 것과 다르다.
+#
+# 실측(2026-09-24, sj2-server, AAPL): `data.quarterlyForecast`·`data.yearlyForecast`
+# 아래 `rows`에 `fiscalEnd`("Sep 2026")·`consensusEPSForecast`·`highEPSForecast`·
+# `lowEPSForecast`·`noOfEstimates`·`up`·`down`이 숫자 그대로 온다(문자열 아님).
+# 같은 `fiscalEnd`가 분기·연간 두 구간에 같이 나올 수 있어(AAPL "Sep 2026"·
+# "Sep 2027") `period_type`이 유일성 키에 들어간다.
+#
+# **분석 커버리지가 없는 심볼도, 존재하지 않는 심볼도 HTTP 200이다**
+# (실측: `ATER`는 `quarterlyForecast: null` — 커버리지 없음. `ZZZZZ`는
+# `data: null`에 `status.rCode: 400` — 심볼 없음). 둘 다 실패가 아니라 0행으로
+# 판단한다 — 재시도해도 안 바뀌는 응답을 실패로 세면 영원히 재시도만 한다.
+#
+# `targetprice`(목표주가·매수/보유/매도 수)·`ratings`(의견·애널리스트 명단)도
+# 같은 원천에서 필드가 확인됐지만(04 §2), `historicalConsensus`가 종목마다
+# 같은 13개월인지·`upgradesDowngrades`가 언제 차는지가 아직 미확인이라(99 §3.4
+# 12·13번) 이번에는 derive하지 않는다 — raw만 남겨 두면 나중에 다시 뽑을 수 있다.
+
+NASDAQ_ANALYST_ESTIMATES_ARROW = pyar.schema(
+    [
+        ("collected_week", pyar.date32()),  # raw 파티션의 ISO 주 월요일
+        ("symbol", pyar.string()),
+        ("period_type", pyar.string()),  # 원문 하위 키 그대로 (quarterlyForecast 등)
+        ("fiscal_end_raw", pyar.string()),  # 원문 그대로 ("Sep 2026")
+        ("fiscal_end", pyar.date32()),  # 그 달 말일로 푼 것. 못 풀면 null
+        ("consensus_eps_forecast", pyar.float64()),
+        ("high_eps_forecast", pyar.float64()),
+        ("low_eps_forecast", pyar.float64()),
+        ("n_estimates", pyar.int32()),
+        ("up", pyar.int32()),  # 최근 4주 상향 수정 건수
+        ("down", pyar.int32()),  # 최근 4주 하향 수정 건수
+        ("observed_at", pyar.timestamp("us", tz="UTC")),  # 그 심볼을 받은 실제 시각
+    ]
+)
+
+
 ARROW_SCHEMAS: dict[str, pyar.Schema] = {
     "prices_daily": PRICES_DAILY_ARROW,
     "corp_actions": CORP_ACTIONS_ARROW,
@@ -585,6 +626,7 @@ ARROW_SCHEMAS: dict[str, pyar.Schema] = {
     "earnings_calendar": EARNINGS_CALENDAR_ARROW,
     "ftd_fails": FTD_FAILS_ARROW,
     "cusip_symbol_pit": CUSIP_SYMBOL_PIT_ARROW,
+    "nasdaq_analyst_estimates": NASDAQ_ANALYST_ESTIMATES_ARROW,
 }
 
 FRAME_SCHEMAS: dict[str, pa.DataFrameSchema] = {
