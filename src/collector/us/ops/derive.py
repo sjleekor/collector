@@ -83,6 +83,11 @@ RECIPES: dict[str, Recipe] = {
         ("earnings_calendar",),
         raw_inputs=("nasdaq/earnings_calendar",),
     ),
+    "nasdaq-analyst-estimates": Recipe(
+        "collector.us.sources.nasdaq_analyst:load_nasdaq_analyst_estimates",
+        ("nasdaq_analyst_estimates",),
+        raw_inputs=("nasdaq/analyst_earnings_forecast",),
+    ),
     "fundamentals": Recipe(
         "collector.us.sources.sec_bulk:load_companyfacts",
         ("fundamentals",),

@@ -146,6 +146,26 @@ def _handle_universe_rebuild(args: argparse.Namespace) -> None:
     )
 
 
+def _handle_nasdaq_analyst_run(args: argparse.Namespace) -> None:
+    from collector.us.ops import nasdaq_analyst
+
+    symbols = (
+        [s.strip() for s in args.symbols.split(",") if s.strip()] if args.symbols else None
+    )
+    result = nasdaq_analyst.run_weekly(
+        _root(args),
+        today=dt.date.fromisoformat(args.today) if args.today else None,
+        symbols=symbols,
+        budget_seconds=args.budget_seconds,
+        interval_seconds=args.interval_seconds,
+        max_retries=args.max_retries,
+        dry_run=args.dry_run,
+    )
+    _print(result)
+    if not result["ok"]:
+        raise SystemExit(1)
+
+
 def _handle_prune(args: argparse.Namespace) -> None:
     from collector.us.ops import retention
     from collector.us.store.schema import ARROW_SCHEMAS
@@ -295,3 +315,49 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         "--apply", action="store_true", help="실제로 지운다. 기본은 세기만 한다."
     )
     prune_parser.set_defaults(handler=_handle_prune)
+
+    nasdaq_parser = subparsers.add_parser(
+        "us-nasdaq-analyst",
+        help="Nasdaq 애널리스트 추정치 — 주 1회 전진 축적 전용 (source_expansion 04).",
+    )
+    nasdaq_sub = nasdaq_parser.add_subparsers(dest="us_nasdaq_analyst_command", required=True)
+    nasdaq_run = nasdaq_sub.add_parser(
+        "run",
+        help="이번 주 유니버스 중 아직 못 받은 심볼을 받는다. 같은 주에 다시 돌려도 안전하다.",
+    )
+    nasdaq_run.add_argument(
+        "--lake-root",
+        default=None,
+        help="변형 lake 경로. 기본은 $STOCK_DATA_ROOT/us 다 (D9).",
+    )
+    nasdaq_run.add_argument(
+        "--today",
+        default=None,
+        help="오늘 날짜를 고정한다 (시험용). 이 날짜가 속한 ISO 주가 대상이다.",
+    )
+    nasdaq_run.add_argument(
+        "--symbols",
+        default=None,
+        help="쉼표로 심볼을 직접 준다. 기본은 universe_daily 최신 멤버 — "
+        "스모크 테스트나 특정 종목 재수집에 쓴다.",
+    )
+    nasdaq_run.add_argument(
+        "--budget-seconds",
+        type=float,
+        default=None,
+        help="이 시간이 지나면 멈춘다. 남은 것은 다음 실행이 한다.",
+    )
+    nasdaq_run.add_argument(
+        "--max-retries",
+        type=int,
+        default=2,
+        help="심볼 하나가 실패할 때(타임아웃 등) 다시 시도하는 횟수.",
+    )
+    nasdaq_run.add_argument(
+        "--interval-seconds",
+        type=float,
+        default=None,
+        help="요청 간격 (기본 5초 — 04 §4의 비용 어림).",
+    )
+    nasdaq_run.add_argument("--dry-run", action="store_true", help="할 일만 센다.")
+    nasdaq_run.set_defaults(handler=_handle_nasdaq_analyst_run)
