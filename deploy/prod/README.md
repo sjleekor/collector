@@ -11,7 +11,7 @@
 - **2026-09-21에 `us-derive.sh`를 더했다.** raw→derived를 굳히는 자리가 없었다 — 아래 이벤트 표의 `sdc_daily_us_derive` 행. **`v0.15.1`로 릴리즈·배포·Cronicle 등록까지 끝냈다.** 첫 실행에서 `prices_daily`가 2026-09-09 → **2026-09-18**로 따라잡았다 (+87,693행).
 - **2026-09-20부터 미국 수집도 여기서 돈다** (미국 계획 D18). 이벤트 `sdc_daily_us`, 래퍼 `bin/us-daily.sh`, 볼륨 `/home/whi/data/stock_data:/stock_data`.
   이미지에 **`dolt` 2.3.5**가 들어갔다 (1.32GB → 1.43GB) — 미국 가격·IV/HV 원천이다.
-- **`us-nasdaq-analyst.sh`를 이 저장소에 더했다 (2026-09-24, `feat/us-nasdaq-analyst`).** Nasdaq 애널리스트 추정치(`analyst/{symbol}/earnings-forecast`) 주 1회 전진 축적 — 아래 "제안: `sdc_daily_us_nasdaq_analyst`" 절 참고. **아직 릴리즈·배포·Cronicle 등록 전이다** — 코드·래퍼만 저장소에 있고 원격 `compose.yaml`·Cronicle schedule은 그대로다.
+- **`us-nasdaq-analyst.sh`를 더했다 (2026-09-24, `v0.15.11`).** Nasdaq 애널리스트 추정치(`analyst/{symbol}/earnings-forecast`) 주 1회 전진 축적 — 아래 "`sdc_daily_us_nasdaq_analyst`" 절 참고. **같은 날 `v0.15.11` 배포 뒤 Cronicle에 등록했다.**
 
 원격 `compose.yaml`과 `bin/*.sh` checksum은 현재 로컬 `deploy/prod`와 일치한다.
 
@@ -119,14 +119,14 @@ flowchart TD
 | `sdc_daily_opendart_xbrl` | chain-only | 없음 | `dart-sync-xbrl.sh` | OpenDART XBRL 데이터를 증분 동기화한다. 기본 attempt guard는 10,000건이다. |
 | **`sdc_daily_us`** | **daily 15:00** | 없음 | **`us-daily.sh`** | **미국 raw를 하루치 받는다** (미국 계획 C8). 원천 여덟(dolt·Nasdaq 실적·FINRA regsho·FINRA 잔고·SEC 벌크·SEC 분기·**SEC FTD**·FRED/Wikipedia)을 한 명령이 순서대로 본다. **평일이 아니라 매일이다** — 할 일을 일정이 아니라 `raw/`에 무엇이 있나로 만들어서 주말 실행이 거의 공짜고, 주 1회짜리 SEC 벌크 3GB에 조용한 슬롯을 준다. `catch_up=0`인 이유도 같다: 잡 자체가 마지막으로 받은 것부터 어제까지 메꾼다. **SEC FTD**(2026-09-24 추가)는 반월 파일이라 URL을 규칙으로 못 만들어 목록 페이지를 매번 다시 읽는다 — 새 원천 요청은 반월당 하나뿐이다(`collector/src/collector/us/sources/sec_ftd.py`). |
 | **`sdc_daily_us_derive`** | **Sunday 16:00** | 없음 | **`us-derive.sh`** | **미국 raw를 derived 스냅샷으로 굳힌다** (미국 계획 05 §4.1). **2026-09-21 등록. `catch_up=0`·`max_children=1`.** `sdc_daily_us`는 raw만 받아서 `dolt pull`은 매일 도는데 `prices_daily` 스냅샷이 2026-09-09에 멈춰 있었다. **무엇을 굳힐지는 일정이 아니라 입력이 정한다** — dolt는 커밋 해시, 나머지는 `raw/` mtime을 스냅샷과 비교한다. 그래서 주 1회로 걸어도 분기짜리 SEC 표는 분기에 한 번만 쌓인다. 회당 약 1.5GB다. 락 도메인이 `us`라 15:00 수집과 겹치지 않는다. **유니버스는 여기 없다** — 월 1회라 `us-universe rebuild`가 따로 한다 (03 §5.3). **2026-09-24부터 `ftd_fails`·`cusip_symbol_pit`도 여기서 굳는다** — `us-load ftd`와 같은 recipe(`RECIPES["ftd"]`)를 쓴다. `SDC_US_DERIVE_TABLES` override가 `.env`에 없으므로(2026-09-24 확인) 별도 설정 없이 자동으로 포함된다. |
-| **`sdc_daily_us_nasdaq_analyst`** (제안 — **미등록**) | **Saturday 09:00** | 없음 | **`us-nasdaq-analyst.sh`** | **Nasdaq 애널리스트 추정치를 주 1회 전진 축적한다** (source_expansion 04·99 순번 4). 아래 "제안" 절 참고. |
+| **`sdc_daily_us_nasdaq_analyst`** | **Saturday 09:00** | 없음 | **`us-nasdaq-analyst.sh`** | **Nasdaq 애널리스트 추정치를 주 1회 전진 축적한다** (source_expansion 04·99 순번 4). **2026-09-24 등록. `catch_up=0`·`max_children=1`.** 아래 절 참고. |
 
-### 제안: `sdc_daily_us_nasdaq_analyst` (2026-09-24, 아직 등록 전)
+### `sdc_daily_us_nasdaq_analyst` (2026-09-24 등록)
 
-**아직 Cronicle에 등록하지 않았다.** 이 저장소(`feat/us-nasdaq-analyst`)에 코드와 래퍼만
-있고, 릴리즈·배포·`create_event` 호출은 다음 단계다. 아래는 등록할 때 쓸 제안 값이다.
+**2026-09-24에 `create_event`로 등록했다** (`v0.15.11` 배포 직후). 첫 실행은 같은 날
+`run_event`로 손으로 걸었다. 아래가 등록한 값이다.
 
-| 항목 | 제안 값 | 이유 |
+| 항목 | 등록 값 | 이유 |
 |---|---|---|
 | Event id | `sdc_daily_us_nasdaq_analyst` | `sdc_daily_us_derive`처럼 실제로는 주 1회지만 기존 명명(`sdc_daily_*`)을 따른다 |
 | Timing | **Saturday 09:00 KST** | 한국 체인(Mon-Fri 18:30)·`sdc_daily_us`(매일 15:00)·`sdc_daily_us_derive`(일 16:00) 어느 것과도 겹치지 않는다. 토요일 09:00에 시작하면 예산(6시간) 안에 끝나도 일요일 16:00 derive보다 한참 먼저 끝나 그 주 데이터가 바로 derive에 들어간다 |
@@ -169,7 +169,7 @@ source lock은 `/tmp/sdc-locks/<domain>.lock`에 `flock`을 걸고, lock 획득 
 | `krx_marketdata` | `prices-backfill-incremental.sh`, `flows-sync.sh`, `common-sync-krx.sh`, `common-sync-pykrx.sh` | 60s |
 | `opendart` | OpenDART sync wrappers, OpenDART backfill | 5s |
 | **`us`** | **`us-daily.sh`** | **0s** — 원천별 간격은 각 클라이언트 안에 있다 (SEC 5s · FINRA·Wikipedia·FRED 1s · Nasdaq 1.5s) |
-| **`us_nasdaq_analyst`** (제안 — 미등록) | **`us-nasdaq-analyst.sh`** | **0s** — 종목당 간격(기본 5초)이 Python 클라이언트 안에 있다. `us`와 다른 도메인을 쓰는 이유는 위 "제안: `sdc_daily_us_nasdaq_analyst`" 절 참고 |
+| **`us_nasdaq_analyst`** | **`us-nasdaq-analyst.sh`** | **0s** — 종목당 간격(기본 5초)이 Python 클라이언트 안에 있다. `us`와 다른 도메인을 쓰는 이유는 위 "`sdc_daily_us_nasdaq_analyst`" 절 참고 |
 
 ### KRX 요청 페이스 (2026-08-16 정정)
 
