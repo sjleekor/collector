@@ -338,6 +338,45 @@ def run_sec_ftd(root: DataRoot, *, budget: _Budget, dry_run: bool = False) -> So
     return run
 
 
+def run_sec_13f(root: DataRoot, *, budget: _Budget, dry_run: bool = False) -> SourceRun:
+    """SEC Form 13F(기관 보유). **목록 페이지를 매번 다시 읽는다** — ``sec_ftd``와
+    같은 이유다(``sec_13f.py`` 모듈 docstring). 새 기간이 올라왔는지는 목록
+    자체를 봐야 안다. 유지 비용은 연구 02 §8 기준 분기 1요청이다.
+    """
+    from collector.us.sources import sec, sec_13f
+
+    run = SourceRun("sec_13f")
+    client = sec.SecClient(user_agent=sec.user_agent_from_env())
+    try:
+        listing = sec_13f.list_13f_files(client)
+    except (sec.SecAccessError, sec_13f.ThirteenFError) as exc:
+        run.missing.append(f"목록 페이지: {exc}")
+        run.ok = False
+        return run
+
+    have = sec_13f.raw_periods(root)
+    todo = sorted(p for p in listing.files if p not in have)
+    run.skipped = len(listing.files) - len(todo)
+    run.pending = len(todo)
+    if listing.duplicates:
+        run.note = f"같은 기간에 링크가 둘 이상: {sorted(listing.duplicates)}"
+    if dry_run or not todo:
+        return run
+
+    for period in todo:
+        if budget.spent():
+            break
+        try:
+            sec_13f.download_13f(client, root, period, listing.files[period])
+        except sec.SecAccessError as exc:
+            run.missing.append(f"{period}: {exc}")
+            continue
+        run.fetched += 1
+    run.pending = len(todo) - run.fetched
+    run.ok = not run.missing
+    return run
+
+
 def run_weekly_macro(
     root: DataRoot, *, today: dt.date, snapshot_date: dt.date | str, dry_run: bool = False
 ) -> SourceRun:
@@ -389,6 +428,7 @@ SOURCES: tuple[str, ...] = (
     "sec_bulk",
     "sec_quarterly",
     "sec_ftd",
+    "sec_13f",
     "weekly_macro",
 )
 
@@ -433,6 +473,8 @@ def run_daily(
             runs.append(run_sec_quarterly(root, today=today, dry_run=dry_run))
         elif name == "sec_ftd":
             runs.append(run_sec_ftd(root, budget=budget, dry_run=dry_run))
+        elif name == "sec_13f":
+            runs.append(run_sec_13f(root, budget=budget, dry_run=dry_run))
         elif name == "weekly_macro":
             runs.append(
                 run_weekly_macro(

@@ -126,6 +126,16 @@ RECIPES: dict[str, Recipe] = {
         ("ftd_fails", "cusip_symbol_pit"),
         raw_inputs=("sec/ftd",),
     ),
+    # 한 로더가 표 둘을 낸다 — `ftd`와 같은 모양이다. 정정의 원본이 다른
+    # 파일에 있을 수 있어(연구 02_sec_13f.md §4.3) `raw/sec/13f/` 전체를
+    # 한 번에 읽는다. `thirteenf_submissions`이 앞이라 `needs_rebuild`가
+    # 그 스냅샷 mtime을 본다 — `inst_holdings_q`는 같은 raw 입력에서
+    # 파생하므로 같이 굳는다.
+    "thirteenf": Recipe(
+        "collector.us.sources.sec_13f:extract_13f",
+        ("thirteenf_submissions", "inst_holdings_q"),
+        raw_inputs=("sec/13f",),
+    ),
     # **원천이 없는 표다.** `exchange_calendars` 가 주는데, 그 라이브러리가
     # 대략 오늘+1년까지만 세션을 만든다. 한 번 굳히고 두면 그 날짜에 하루
     # 실행이 조용히 멈춘다 — 옛 기본값 `end="2026-12-31"` 이 2027-01-01 에

@@ -326,6 +326,48 @@ CUSIP_SYMBOL_PIT_ARROW = pyar.schema(
 )
 
 
+# --- thirteenf_submissions · inst_holdings_q (02_sec_13f.md) -----------------
+# SEC Form 13F(기관 보유). ``filing_date``가 PIT의 축이고 ``period_of_report``는
+# 보유 기준일(분기말)이다 — 파일 이름의 기간이 아니다. 한 파일 안에
+# ``period_of_report``가 25~100개 섞여 있다(연구 §4.2). ``VALUE``는 안 담는다 —
+# 단위(천 달러 -> 달러)가 도중에 바뀌는데 경계를 못 쟀다(연구 §4.1).
+#
+# ``thirteenf_submissions``는 SUBMISSION.tsv를 그대로 정규화한 것이다(정정 대체
+# **전**). ``n_rows``는 그 accession의 INFOTABLE 원본 행 수(필터 전)라
+# ``LAG_13F``·부분 정정 판정에 같이 쓴다.
+
+THIRTEENF_SUBMISSIONS_ARROW = pyar.schema(
+    [
+        ("accession", pyar.string()),
+        ("filing_date", pyar.date32()),  # PIT의 축
+        ("submission_type", pyar.string()),  # 13F-HR | 13F-HR/A | 13F-NT | 13F-NT/A
+        ("filer_cik", pyar.int64()),
+        ("period_of_report", pyar.date32()),  # 보유 기준일(분기말)
+        ("is_amendment", pyar.bool_()),  # submission_type 이 '/A'로 끝난다
+        ("n_rows", pyar.int64()),  # 그 accession의 INFOTABLE 원본 행 수(필터 전)
+        ("observed_at", pyar.timestamp("us", tz="UTC")),
+        ("source_rev", pyar.string()),  # 원문 파일의 기간 태그 (2018q4 | 01jun2026-31aug2026)
+    ]
+)
+
+# ``inst_holdings_q``는 정정 대체·13F-NT 제외·OTHERMANAGER 중복 제거를 거친
+# 종목×보고기준일 요약이다(``sources/sec_13f.py`` docstring이 규칙 전체를 갖고
+# 있다). 전량을 한 번에 읽어 만들므로 ``source_rev``는 반월이 아니라
+# ``13f:<N>periods``처럼 합쳐서 적는다 — ``cusip_symbol_pit``와 같은 관례다.
+
+INST_HOLDINGS_Q_ARROW = pyar.schema(
+    [
+        ("cusip", pyar.string()),
+        ("period_of_report", pyar.date32()),
+        ("n_holders", pyar.int32()),  # 그 CUSIP을 SH·PUTCALL 빈 값으로 보유한 filer 수
+        ("shares_total", pyar.int64()),  # 공동 보유 중복 제거 후 보유 주식 수 합
+        ("n_filers_total_that_period", pyar.int32()),  # 그 분기 전체 13F-HR filer 수
+        ("observed_at", pyar.timestamp("us", tz="UTC")),
+        ("source_rev", pyar.string()),  # "13f:<N>periods"
+    ]
+)
+
+
 # --- listing_snapshots (03 §4.9) ---------------------------------------------
 # Wayback 이 뜬 nasdaqtrader 심볼 디렉터리. is_etf·test_issue 의 PIT 원천이다
 # (dolt symbol 은 PK가 act_symbol 하나뿐이라 오늘 값만 있다 — 03 §5.4).
@@ -627,6 +669,8 @@ ARROW_SCHEMAS: dict[str, pyar.Schema] = {
     "ftd_fails": FTD_FAILS_ARROW,
     "cusip_symbol_pit": CUSIP_SYMBOL_PIT_ARROW,
     "nasdaq_analyst_estimates": NASDAQ_ANALYST_ESTIMATES_ARROW,
+    "thirteenf_submissions": THIRTEENF_SUBMISSIONS_ARROW,
+    "inst_holdings_q": INST_HOLDINGS_Q_ARROW,
 }
 
 FRAME_SCHEMAS: dict[str, pa.DataFrameSchema] = {

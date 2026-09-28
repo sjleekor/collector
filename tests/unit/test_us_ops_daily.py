@@ -98,6 +98,58 @@ def test_daily_rejects_an_unknown_source(tmp_path):
         )
 
 
+def test_sec_13f_is_a_known_source():
+    assert "sec_13f" in daily.SOURCES
+
+
+def test_run_sec_13f_downloads_new_periods_and_skips_known(tmp_path, monkeypatch):
+    """목록에 있는 것 중 ``raw/``에 없는 기간만 받는다 — ``sec_ftd``와 같은 모양이다."""
+    from collector.us.sources import sec_13f
+
+    root = _lake(tmp_path)
+    monkeypatch.setenv("SEC_USER_AGENT", "x/1 (a@b.c)")
+    monkeypatch.setattr(
+        sec_13f,
+        "list_13f_files",
+        lambda client: sec_13f.ThirteenFListing(
+            files={
+                "2018q4": "https://x/a.zip",
+                "2019q1": "https://x/b.zip",
+            },
+            duplicates={},
+            unparsed=[],
+        ),
+    )
+    monkeypatch.setattr(sec_13f, "raw_periods", lambda _root: {"2018q4"})
+    calls: list[str] = []
+    monkeypatch.setattr(
+        sec_13f,
+        "download_13f",
+        lambda client, root, period, url, **kw: calls.append(period) or {"period": period},
+    )
+
+    run = daily.run_sec_13f(root, budget=daily._Budget(None))
+    assert run.skipped == 1
+    assert run.fetched == 1
+    assert calls == ["2019q1"]
+    assert run.ok
+
+
+def test_run_sec_13f_reports_a_missing_listing_as_not_ok(tmp_path, monkeypatch):
+    from collector.us.sources import sec_13f
+
+    root = _lake(tmp_path)
+    monkeypatch.setenv("SEC_USER_AGENT", "x/1 (a@b.c)")
+
+    def _boom(_client):
+        raise sec_13f.ThirteenFError("페이지 구조가 바뀌었다")
+
+    monkeypatch.setattr(sec_13f, "list_13f_files", _boom)
+    run = daily.run_sec_13f(root, budget=daily._Budget(None))
+    assert not run.ok
+    assert "목록 페이지" in run.missing[0]
+
+
 def test_weekly_macro_uses_the_age_of_the_newest_snapshot(tmp_path):
     """오늘 날짜 경로로 찾으면 주 1회가 매일 1회가 된다."""
     root = _lake(tmp_path)

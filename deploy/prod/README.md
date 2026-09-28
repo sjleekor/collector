@@ -147,6 +147,23 @@ flowchart TD
 안전하다(이미 받은 심볼은 건너뛴다) — 필요하면 나중에 수요일 등에 가벼운 catch-up
 트리거를 하나 더 추가하는 것도 고려할 수 있다.
 
+### 제안 — SEC 13F 원천·파생 표 (2026-09-28, 브랜치 `us4-13f`)
+
+**아직 코드만이다. 릴리즈·배포·Cronicle 등록은 안 했다.** `us4-13f` 브랜치가
+`us-daily`에 아홉째 원천 `sec_13f`(SEC Form 13F 기관 보유, `src/collector/us/sources/sec_13f.py`)를,
+`us-derive`에 `thirteenf` recipe(`thirteenf_submissions`·`inst_holdings_q`)를 더했다 —
+FTD를 붙인 방식 그대로다. 아래는 배포될 때 이 문서에서 같이 바꿔야 할 것의 제안이다.
+
+| 무엇 | 지금(2026-09-28, 이 표 기준) | 배포되면 |
+|---|---|---|
+| `sdc_daily_us` 설명 | "원천 여덟" | "원천 아홉"으로 고치고 SEC FTD 뒤에 **SEC 13F**를 더한다 |
+| `sdc_daily_us_derive` 설명 | `ftd_fails`·`cusip_symbol_pit`까지만 언급 | `thirteenf_submissions`·`inst_holdings_q`도 같은 recipe 방식(`RECIPES["thirteenf"]`)으로 굳는다는 문장을 더한다 |
+| 이미지 태그 | `v0.15.11` | 이 변경을 담아 릴리즈한 버전으로 갱신 |
+
+**등록을 제안하는 것이지 실제로 건 것이 아니다.** Cronicle event·compose 이미지 태그는
+그대로다 — 배포하는 사람이 릴리즈 뒤 이 절을 지우고 위 표의 "배포되면" 칸을
+실제 표·설명에 반영하면 된다.
+
 ## Wrapper와 lock/throttle
 
 대부분의 daily wrapper는 `bin/lib/sdc-wrapper.sh`를 source하고 `docker compose run --rm collector ...`를 호출한다. wrapper의 주요 실행 함수는 아래와 같다.
