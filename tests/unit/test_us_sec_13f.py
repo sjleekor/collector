@@ -1,7 +1,7 @@
 """SEC Form 13F — 목록 페이지 파싱·원문 파서·정정 대체 (02_sec_13f.md).
 
 네트워크 없이 돈다. 합성 fixture로 헤더·정정 대체·OTHERMANAGER 중복·13F-NT 제외·
-한 파일 안 다중 기준일을 본다 — 실제 13F 파일이 없어 조사 문서(02 §2·§4)의
+한 파일 안 다중 기준일·PIT 컷오프를 본다 — 실제 13F 파일이 없어 조사 문서(02 §2·§4)의
 표본 줄로 fixture를 만든다.
 """
 
@@ -318,10 +318,12 @@ def test_extract_13f_full_amendment_replaces_the_original_across_files(tmp_path)
     infotable_a = "\n".join([_INFO_HEADER, _info_row("0001-18-000001", "037833100", 1000)])
     # 정정: 2018q4 파일에 있다. 같은 (filer_cik, period_of_report) 를 대체한다 —
     # 전체 재제출(행 수 비율 1.0 근처)이고 주식 수가 바뀌었다.
+    # filing_date는 원본(14-NOV-2018)보다 늦되 PIT 컷오프(period_of_report + 60일
+    # = 2018-11-29) 안에 있어야 한다 — 20-NOV-2018 (51일 경과).
     submission_b = "\n".join(
         [
             _SUB_HEADER,
-            "0001-18-000002\t20-DEC-2018\t13F-HR/A\t0001111111\t30-SEP-2018",
+            "0001-18-000002\t20-NOV-2018\t13F-HR/A\t0001111111\t30-SEP-2018",
         ]
     )
     infotable_b = "\n".join([_INFO_HEADER, _info_row("0001-18-000002", "037833100", 1500)])
@@ -351,11 +353,13 @@ def test_extract_13f_counts_a_partial_amendment(tmp_path):
     규칙 자체는 안 바꾼다 — 정정은 여전히 원본을 대체한다.
     """
     root = _lake(tmp_path)
+    # 정정 filing_date(20-NOV-2018)는 원본(01-NOV-2018)보다 늦되 PIT 컷오프
+    # (period_of_report + 60일 = 2018-11-29) 안에 있어야 한다.
     submission = "\n".join(
         [
             _SUB_HEADER,
             "0001-18-000001\t01-NOV-2018\t13F-HR\t0001111111\t30-SEP-2018",
-            "0001-18-000002\t01-DEC-2018\t13F-HR/A\t0001111111\t30-SEP-2018",
+            "0001-18-000002\t20-NOV-2018\t13F-HR/A\t0001111111\t30-SEP-2018",
         ]
     )
     infotable = "\n".join(
@@ -423,11 +427,13 @@ def test_extract_13f_groups_by_period_of_report_not_file_name(tmp_path):
     """파일 이름의 기간이 아니라 행의 ``PERIODOFREPORT``로 묶는다 — 한 파일에
     보고 기준일이 여럿 섞일 수 있다(연구 §4.2)."""
     root = _lake(tmp_path)
+    # 두 번째 필러의 filing_date는 PIT 컷오프(period_of_report + 60일 =
+    # 2018-08-29) 안에 있어야 한다 — 15-AUG-2018 (46일 경과).
     submission = "\n".join(
         [
             _SUB_HEADER,
             "0001-18-000001\t31-OCT-2018\t13F-HR\t0001111111\t30-SEP-2018",
-            "0002-18-000001\t15-OCT-2018\t13F-HR\t0002222222\t30-JUN-2018",
+            "0002-18-000001\t15-AUG-2018\t13F-HR\t0002222222\t30-JUN-2018",
         ]
     )
     infotable = "\n".join(
@@ -472,3 +478,78 @@ def test_extract_13f_skips_a_broken_period_but_keeps_going(tmp_path):
     assert len(result["periods_failed"]) == 1
     assert "2019q1" in result["periods_failed"][0]
     assert result["inst_holdings_q"]["rows"] == 1
+
+
+# --- PIT 컷오프(LAG_13F_DAYS) ---------------------------------------------------
+
+
+def test_extract_13f_ignores_an_amendment_filed_after_the_cutoff(tmp_path):
+    """정정본의 ``filing_date - period_of_report``가 ``LAG_13F_DAYS``를 넘으면
+    무시한다 — 원본(컷오프 안)이 그대로 남는다. 원본이 몇 년 뒤 정정으로
+    바뀌는 룩어헤드를 막는 규칙이다."""
+    root = _lake(tmp_path)
+    submission = "\n".join(
+        [
+            _SUB_HEADER,
+            # 원본 — 컷오프(2018-09-30 + 60일 = 2018-11-29) 안
+            "0001-18-000001\t01-NOV-2018\t13F-HR\t0001111111\t30-SEP-2018",
+            # 정정 — 컷오프 밖 (107일 경과)
+            "0001-18-000002\t15-JAN-2019\t13F-HR/A\t0001111111\t30-SEP-2018",
+        ]
+    )
+    infotable = "\n".join(
+        [
+            _INFO_HEADER,
+            _info_row("0001-18-000001", "037833100", 1000),
+            _info_row("0001-18-000002", "037833100", 1500),
+        ]
+    )
+    _write_13f_zip(root, "2018q4", submission=submission, infotable=infotable)
+
+    result = sec_13f.extract_13f(root, snapshot_date="2026-09-28")
+    assert result["submissions_after_cutoff"] == 1
+
+    import duckdb
+
+    con = duckdb.connect()
+    # 원본(1000주)이 남는다 — 컷오프 밖 정정(1500주)은 대체를 못 한다
+    holdings = con.execute(
+        f"SELECT cusip, shares_total FROM '{result['inst_holdings_q']['path']}'"
+    ).fetchall()
+    assert holdings == [("037833100", 1000)]
+
+    # thirteenf_submissions는 컷오프 없이 둘 다 남긴다
+    subs = con.execute(
+        f"SELECT accession FROM '{result['thirteenf_submissions']['path']}' ORDER BY accession"
+    ).fetchall()
+    assert subs == [("0001-18-000001",), ("0001-18-000002",)]
+
+
+def test_extract_13f_drops_a_lone_submission_filed_after_the_cutoff(tmp_path):
+    """단독 제출 하나뿐이어도 컷오프 밖이면 ``inst_holdings_q``에 행을 안 만든다
+    — 옛 기준일에 뒤늦게 낸 제출 하나가 ``n_filers_total_that_period = 1``짜리
+    이상치 행을 만드는 문제를 막는 규칙이다. ``thirteenf_submissions``에는
+    그대로 남는다."""
+    root = _lake(tmp_path)
+    submission = "\n".join(
+        [
+            _SUB_HEADER,
+            # 기준일 2006-09-30 인데 2018년에야 낸 제출 — 컷오프를 한참 넘는다
+            "0001-18-000001\t01-NOV-2018\t13F-HR\t0001111111\t30-SEP-2006",
+        ]
+    )
+    infotable = "\n".join([_INFO_HEADER, _info_row("0001-18-000001", "037833100", 700)])
+    _write_13f_zip(root, "2018q4", submission=submission, infotable=infotable)
+
+    result = sec_13f.extract_13f(root, snapshot_date="2026-09-28")
+    assert result["submissions_after_cutoff"] == 1
+    assert result["partial_amendments"] == 0
+    assert result["inst_holdings_q"]["rows"] == 0
+
+    import duckdb
+
+    con = duckdb.connect()
+    subs = con.execute(
+        f"SELECT accession, n_rows FROM '{result['thirteenf_submissions']['path']}'"
+    ).fetchall()
+    assert subs == [("0001-18-000001", 1)]

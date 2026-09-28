@@ -214,6 +214,17 @@ def _extract_decoded(zip_path: Path, member: str, dest: Path) -> Path:
 #: 내부자 거래 데이터셋(``sec.py``의 ``_INSIDER_DATE``)과 같다.
 _DATE_FMT = "%d-%b-%Y"
 
+#: 13F 제출의 PIT 컷오프 — ``filing_date - period_of_report``(달력일)가 이보다
+#: 크면 ``inst_holdings_q``에서 뺀다. ``inst_holdings_q``는 ``(filer_cik,
+#: period_of_report)``마다 filing_date가 가장 늦은 제출을 남기는데 제출 시점
+#: 제한이 없어서, ① 몇 년 뒤에 낸 정정본이 과거 분기 값을 바꾸는 룩어헤드와
+#: ② 옛 기준일에 뒤늦게 낸 제출 하나가 ``n_filers_total_that_period = 1``짜리
+#: 이상치 행을 만드는 문제가 둘 다 실물 2018q4 zip으로 확인됐다. 그 파일의
+#: 13F-HR ``filing_date - period_of_report``는 중앙값 44일 · p99 50일 · 최대
+#: 74일(2026-09-28 실측) — 60일이면 p99를 덮고도 여유가 있다.
+#: **사전등록이 닫히기 전 임시값이다** — 다른 기간으로 다시 재면 바뀔 수 있다.
+LAG_13F_DAYS = 60
+
 _TSV = "delim='\t', header=true, quote='', escape='', all_varchar=true"
 
 
@@ -232,10 +243,14 @@ def extract_13f(
     **규칙 (계획 20260927_us4_flow_features §5.3):**
 
     * ``13F-NT``\\/``13F-NT/A``는 뺀다 — 보유 표가 없다
+    * **PIT 컷오프**: ``filing_date <= period_of_report + LAG_13F_DAYS``인
+      제출만 쓴다 — 원본·정정 모두. 컷오프 밖 제출 수는 ``submissions_after_cutoff``에
+      센다. ``thirteenf_submissions``는 이 컷오프 없이 전량 그대로 남긴다 —
+      ``LAG_13F_DAYS`` 실측을 그 표에서 하므로 순환을 막는다
     * ``13F-HR/A``는 같은 ``(filer_cik, period_of_report)``의 앞 제출을
-      **대체**한다 — 그 조합에서 ``filing_date``가 가장 늦은 accession
-      하나만 남긴다. **전량을 한 번에 읽어야** 한다 — 정정의 원본이 다른
-      파일에 있을 수 있다(연구 §4.3)
+      **대체**한다 — 그 조합에서(컷오프 안 제출 중) ``filing_date``가 가장
+      늦은 accession 하나만 남긴다. **전량을 한 번에 읽어야** 한다 — 정정의
+      원본이 다른 파일에 있을 수 있다(연구 §4.3)
     * 남는 것 중 ``SSHPRNAMTTYPE = 'SH'``\\이고 ``PUTCALL``\\이 빈 행만 쓴다
       (옵션 보유를 주식 보유로 안 센다)
     * ``OTHERMANAGER``\\가 찬 행은 filer 수(``n_holders``)에는 세고, 주식 수
@@ -369,8 +384,23 @@ def extract_13f(
     )
     sub_stats = verify_snapshot(dest_sub, "thirteenf_submissions", unique_on=("accession",))
 
-    # --- 정정 대체: 같은 (filer_cik, period_of_report)에서 filing_date 최신만 ---
+    # --- PIT 컷오프: filing_date - period_of_report > LAG_13F_DAYS 인 제출은 뺀다 ---
     # 13F-NT/13F-NT/A 는 여기서 이미 빠진다 — 보유 표가 없어 filer 수에도 못 낀다.
+    con.execute(
+        f"""
+        CREATE OR REPLACE TEMP TABLE hr_all AS
+        SELECT *,
+               filing_date > period_of_report + INTERVAL '{LAG_13F_DAYS} days' AS after_cutoff
+        FROM submissions_dedup
+        WHERE submission_type LIKE '13F-HR%'
+        """
+    )
+    submissions_after_cutoff = con.execute(
+        "SELECT count(*) FROM hr_all WHERE after_cutoff"
+    ).fetchone()[0]
+
+    # --- 정정 대체: 컷오프 안에서, 같은 (filer_cik, period_of_report)의
+    # filing_date 최신만 ---
     con.execute(
         """
         CREATE OR REPLACE TEMP TABLE hr_ranked AS
@@ -384,8 +414,8 @@ def extract_13f(
                    ORDER BY filing_date ASC, accession ASC
                ) AS rn_first,
                count(*) OVER (PARTITION BY filer_cik, period_of_report) AS n_versions
-        FROM submissions_dedup
-        WHERE submission_type LIKE '13F-HR%'
+        FROM hr_all
+        WHERE NOT after_cutoff
         """
     )
     con.execute(
@@ -492,6 +522,7 @@ def extract_13f(
         "periods_ok": periods_ok,
         "periods_failed": periods_failed,
         "duplicate_accessions_dropped": dup_accessions,
+        "submissions_after_cutoff": submissions_after_cutoff,
         "partial_amendments": partial_amendments,
         "othermanager_filled_share": othermanager_share,
         "thirteenf_submissions": {"path": dest_sub, **sub_stats},
