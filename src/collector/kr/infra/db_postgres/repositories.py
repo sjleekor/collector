@@ -3827,6 +3827,71 @@ class PostgresStorage:
 
         return counts
 
+    # -- KRX index levels -------------------------------------------------------
+
+    def get_krx_index_dates(self, index_group: str, start: date, end: date) -> set[date]:
+        """Return dates in ``[start, end]`` that already have rows for *index_group*."""
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT DISTINCT bas_dd FROM krx_index_daily "
+                    "WHERE index_group = %s AND bas_dd BETWEEN %s AND %s",
+                    (index_group, start, end),
+                )
+                return {row[0] for row in cur.fetchall()}
+
+    def upsert_krx_index_daily(self, rows: list) -> UpsertResult:
+        """Upsert one ``(bas_dd, index_group)`` slice into ``krx_index_daily``."""
+        if not rows:
+            return UpsertResult()
+
+        statement = """
+            INSERT INTO krx_index_daily (
+                bas_dd, index_group, idx_clss, idx_nm, close_idx, chg_idx, fluc_rt,
+                open_idx, high_idx, low_idx, acc_trdvol, acc_trdval, mktcap,
+                fetched_at, source
+            )
+            VALUES %s
+            ON CONFLICT (bas_dd, index_group, idx_nm) DO UPDATE SET
+                idx_clss = EXCLUDED.idx_clss,
+                close_idx = EXCLUDED.close_idx,
+                chg_idx = EXCLUDED.chg_idx,
+                fluc_rt = EXCLUDED.fluc_rt,
+                open_idx = EXCLUDED.open_idx,
+                high_idx = EXCLUDED.high_idx,
+                low_idx = EXCLUDED.low_idx,
+                acc_trdvol = EXCLUDED.acc_trdvol,
+                acc_trdval = EXCLUDED.acc_trdval,
+                mktcap = EXCLUDED.mktcap,
+                fetched_at = EXCLUDED.fetched_at,
+                source = EXCLUDED.source
+        """
+        args = [
+            (
+                r.bas_dd,
+                r.index_group,
+                r.idx_clss,
+                r.idx_nm,
+                r.close_idx,
+                r.chg_idx,
+                r.fluc_rt,
+                r.open_idx,
+                r.high_idx,
+                r.low_idx,
+                r.acc_trdvol,
+                r.acc_trdval,
+                r.mktcap,
+                r.fetched_at,
+                r.source,
+            )
+            for r in rows
+        ]
+        result = UpsertResult()
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                result.updated = _execute_values_counted(cur, statement, args, page_size=1000)
+        return result
+
     # -- Ingestion runs -------------------------------------------------------
 
     def record_run(self, run: IngestionRun) -> None:

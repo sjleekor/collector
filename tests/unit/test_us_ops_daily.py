@@ -169,6 +169,31 @@ def test_weekly_macro_uses_the_age_of_the_newest_snapshot(tmp_path):
     assert stale.pending == 2
 
 
+def test_weekly_macro_force_bypasses_the_age_gate(tmp_path, monkeypatch):
+    from collector.us.sources import fred, sec
+    from collector.us.sources import wikipedia as wp
+
+    root = _lake(tmp_path)
+    for table in ("macro_series", "index_constituents"):
+        p = snapshot_path(root, table, "2026-09-14")
+        p.parent.mkdir(parents=True)
+        p.write_bytes(b"x")
+        os.utime(p, (0, dt.datetime(2026, 9, 14).timestamp()))
+    calls = []
+    monkeypatch.setattr(fred, "api_key_from_env", lambda: "k")
+    monkeypatch.setattr(fred, "FredClient", lambda **kw: object())
+    monkeypatch.setattr(fred, "load_macro_series", lambda *a, **kw: calls.append("fred"))
+    monkeypatch.setattr(sec, "user_agent_from_env", lambda: "x/1 (a@b.c)")
+    monkeypatch.setattr(wp, "WikipediaClient", lambda **kw: object())
+    monkeypatch.setattr(wp, "load_index_constituents", lambda *a, **kw: calls.append("wp"))
+
+    kw = dict(today=dt.date(2026, 9, 18), snapshot_date="2026-09-19")
+    plain = daily.run_weekly_macro(root, **kw)
+    assert plain.fetched == 0 and calls == []
+    forced = daily.run_weekly_macro(root, force=True, **kw)
+    assert forced.fetched == 2 and calls == ["fred", "wp"]
+
+
 def test_last_closed_quarter_does_not_ask_for_an_open_one():
     assert daily._last_closed_quarter(dt.date(2026, 9, 20)) == (2026, 2)
     assert daily._last_closed_quarter(dt.date(2026, 1, 5)) == (2025, 4)

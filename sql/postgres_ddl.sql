@@ -753,6 +753,37 @@ CREATE INDEX IF NOT EXISTS ix_dart_capital_change_raw_lookup
 CREATE INDEX IF NOT EXISTS ix_dart_capital_change_raw_sync_cursor
     ON dart_capital_change_raw (fetched_at, raw_id);
 
+-- 4c) krx_index_daily ─ KRX index levels (업종·규모·대표지수), KRX Open API `idx` group
+--
+-- One row per (date, index group, index name).  index_group is the endpoint
+-- (kospi | kosdaq | krx) because the same name can appear in more than one.
+-- History starts 2010-01-04.  Same-day data is not published, so the newest
+-- row is always a previous session.
+CREATE TABLE IF NOT EXISTS krx_index_daily (
+    bas_dd       DATE        NOT NULL,
+    index_group  TEXT        NOT NULL,   -- kospi | kosdaq | krx
+    idx_clss     TEXT,
+    idx_nm       TEXT        NOT NULL,
+    close_idx    NUMERIC,
+    chg_idx      NUMERIC,
+    fluc_rt      NUMERIC,
+    open_idx     NUMERIC,
+    high_idx     NUMERIC,
+    low_idx      NUMERIC,
+    acc_trdvol   BIGINT,
+    acc_trdval   NUMERIC,
+    mktcap       NUMERIC,
+    fetched_at   TIMESTAMPTZ NOT NULL,
+    source       TEXT        NOT NULL DEFAULT 'krx_openapi',
+    PRIMARY KEY (bas_dd, index_group, idx_nm)
+);
+
+CREATE INDEX IF NOT EXISTS ix_krx_index_daily_name_date
+    ON krx_index_daily (idx_nm, bas_dd);
+
+CREATE INDEX IF NOT EXISTS ix_krx_index_daily_sync_cursor
+    ON krx_index_daily (fetched_at, bas_dd, index_group, idx_nm);
+
 -- 16) krx_security_flow_raw ─ daily investor/short-selling/borrow flow metrics
 CREATE TABLE IF NOT EXISTS krx_security_flow_raw (
     raw_id               BIGSERIAL   PRIMARY KEY,

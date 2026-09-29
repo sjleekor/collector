@@ -8,6 +8,8 @@ Subcommands::
     collector universe sync  [--source fdr|pykrx] [--markets ...]
     collector prices backfill [--market ...] [--tickers ...] [--start ...]
     collector prices market-cap-backfill [--market ...] [--start ...] [--end ...]
+    collector index sync --source krx-openapi [--groups kospi,kosdaq,krx]
+                         (--start ... --end ... | --incremental --lookback-days N)
     collector validate       [--date ...] [--market ...]
 
 Each subcommand parses arguments and delegates to the corresponding
@@ -2356,6 +2358,74 @@ def _handle_prices_market_cap_backfill(args: argparse.Namespace) -> None:
     _exit_if_run_aborted(result.errors, "Market-cap backfill")
 
 
+def _handle_index_sync(args: argparse.Namespace) -> None:
+    """Handle ``collector index sync``."""
+    from collector.kr.adapters.index_krx_openapi import INDEX_ENDPOINTS
+    from collector.kr.service.sync_krx_index import resolve_range, sync_krx_index
+
+    groups = [g.strip().lower() for g in args.groups.split(",") if g.strip()]
+    unknown = [g for g in groups if g not in INDEX_ENDPOINTS]
+    if not groups or unknown:
+        print(
+            f"❌ Unknown index group(s) {unknown}; choose from {sorted(INDEX_ENDPOINTS)}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if args.incremental and args.start is not None:
+        print("❌ --incremental cannot be combined with --start", file=sys.stderr)
+        sys.exit(1)
+    if not args.incremental and args.start is None:
+        print("❌ Give --start (range mode) or --incremental.", file=sys.stderr)
+        sys.exit(1)
+
+    start, end = resolve_range(
+        start=args.start,
+        end=args.end,
+        incremental=args.incremental,
+        lookback_days=args.lookback_days,
+    )
+    settings = get_settings()
+
+    print(
+        f"→ index sync: groups={groups}, start={start}, end={end}, force={args.force}, "
+        f"max_calls={args.max_calls}, max_consecutive_failures={args.max_consecutive_failures}"
+    )
+
+    from collector.kr.adapters.index_krx_openapi import KrxOpenApiIndexProvider
+    from collector.kr.infra.db_postgres.repositories import PostgresStorage
+
+    result = sync_krx_index(
+        provider=KrxOpenApiIndexProvider(_build_krx_openapi_client(settings)),
+        storage=PostgresStorage(settings.db_dsn),
+        groups=groups,
+        start=start,
+        end=end,
+        force=args.force,
+        max_calls=args.max_calls,
+        max_consecutive_failures=args.max_consecutive_failures,
+    )
+
+    print(f"   - Calls:           {result.calls}")
+    print(f"   - Dates fetched:   {result.dates_fetched}")
+    print(f"   - Dates skipped:   {result.dates_skipped} (already stored)")
+    print(f"   - Empty dates:     {result.empty_dates} (non-trading day or not yet published)")
+    print(f"   - Rows upserted:   {result.rows_upserted}")
+    print(f"   - Failures:        {result.failures}")
+    if result.stopped_by_max_calls:
+        print("   - Stopped cleanly at --max-calls; rerun the same command to resume.")
+
+    fatal = [k for k in result.errors if k == "quota_exhausted" or k.startswith("not_approved")]
+    for key in fatal:
+        print(f"❌ Index sync stopped ({key}): {result.errors[key]}", file=sys.stderr)
+    if fatal:
+        sys.exit(1)
+    _exit_if_run_aborted(result.errors, "Index sync")
+    if result.errors:
+        print(f"⚠ Index sync completed with {len(result.errors)} errors.", file=sys.stderr)
+    else:
+        print("✅ Index sync completed successfully.")
+
+
 def _handle_validate(args: argparse.Namespace) -> None:
     """Handle ``collector validate``."""
     settings = get_settings()
@@ -3973,6 +4043,59 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     prices_market_cap.set_defaults(handler=_handle_prices_market_cap_backfill)
+
+    # -- index ----------------------------------------------------------------
+    index_parser = subparsers.add_parser("index", help="KRX index level commands.")
+    index_sub = index_parser.add_subparsers(dest="index_command", required=True)
+    index_sync = index_sub.add_parser(
+        "sync",
+        help="Sync KRX index daily levels (업종·규모·대표지수) from the Open API.",
+    )
+    index_sync.add_argument(
+        "--source",
+        choices=("krx-openapi",),
+        default="krx-openapi",
+        help="Only the official KRX Open API is supported (needs AUTH_KEYS).",
+    )
+    index_sync.add_argument(
+        "--groups",
+        type=str,
+        default="kospi,kosdaq,krx",
+        help="Comma-separated: kospi, kosdaq, krx (one endpoint call per group per date).",
+    )
+    index_sync.add_argument("--start", type=_parse_date, default=None)
+    index_sync.add_argument(
+        "--end",
+        type=_parse_date,
+        default=None,
+        help="Last date. Defaults to yesterday (KST) at run time; never later than that.",
+    )
+    index_sync.add_argument(
+        "--incremental",
+        action="store_true",
+        default=False,
+        help="end = yesterday (KST), start = end - --lookback-days.",
+    )
+    index_sync.add_argument("--lookback-days", type=int, default=7)
+    index_sync.add_argument(
+        "--max-calls",
+        type=int,
+        default=None,
+        help="Stop cleanly after this many HTTP calls (quota is ~10,000/key/day).",
+    )
+    index_sync.add_argument(
+        "--max-consecutive-failures",
+        type=int,
+        default=5,
+        help="Stop the run after this many calls fail in a row (0 disables).",
+    )
+    index_sync.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help="Re-fetch dates that are already stored.",
+    )
+    index_sync.set_defaults(handler=_handle_index_sync)
 
     # -- profile --------------------------------------------------------------
     profile_parser = subparsers.add_parser(

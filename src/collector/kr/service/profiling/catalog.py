@@ -101,6 +101,34 @@ DAILY_MARKET_CAP = TableProfileSpec(
     domain_checks=("pit_universe_coverage",),
 )
 
+# KRX index levels (업종·규모·대표지수), one row per (date, group, index name).
+# No ticker: entity_key is the index name.  No FK to stock_master.
+KRX_INDEX_DAILY = TableProfileSpec(
+    table="krx_index_daily",
+    weight=ProfileWeight.LIGHT,
+    role=ProfileTableRole.RAW,
+    entity_key="idx_nm",
+    time_col="bas_dd",
+    natural_key=("bas_dd", "index_group", "idx_nm"),
+    numeric_cols=(
+        "close_idx",
+        "chg_idx",
+        "fluc_rt",
+        "open_idx",
+        "high_idx",
+        "low_idx",
+        "acc_trdvol",
+        "acc_trdval",
+        "mktcap",
+    ),
+    category_cols=("index_group", "idx_clss", "source"),
+    null_cols=("close_idx", "open_idx", "acc_trdvol", "acc_trdval", "mktcap"),
+    ingest_col="fetched_at",
+    cost_class=CostClass.CHEAP,
+    sampling=SamplingPolicy(sample_pct=None),
+    domain_checks=(),
+)
+
 
 # ---------------------------------------------------------------------------
 # Wave 1 — large / long-format tables (sampling + drilldown)
@@ -535,6 +563,7 @@ _CATALOG: tuple[TableProfileSpec, ...] = (
     # DuckDB marts — so they are no longer profiled here.
     DAILY_OHLCV,
     DAILY_MARKET_CAP,
+    KRX_INDEX_DAILY,
     KRX_SECURITY_FLOW_RAW,
     COMMON_FEATURE_OBSERVATION_RAW,
     DART_FINANCIAL_STATEMENT_RAW,

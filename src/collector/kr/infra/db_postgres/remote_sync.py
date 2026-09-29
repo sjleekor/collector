@@ -100,6 +100,8 @@ PIPELINE_FULL_REFRESH_TABLE_NAMES: tuple[str, ...] = (
     # prices backfill
     "daily_ohlcv",
     "daily_market_cap",
+    # KRX index levels (업종·규모·대표지수)
+    "krx_index_daily",
     # KRX security-level flow metrics
     "krx_security_flow_raw",
     # account / financial / XBRL pipeline
@@ -297,6 +299,56 @@ SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
         cursor_indexes=(9, 0, 1, 2),
         copy_merge_enabled=True,
         conflict_update_where_sql="daily_market_cap.fetched_at <= EXCLUDED.fetched_at",
+    ),
+    TableSyncSpec(
+        name="krx_index_daily",
+        select_list=(
+            "bas_dd, index_group, idx_nm, idx_clss, close_idx, chg_idx, fluc_rt, "
+            "open_idx, high_idx, low_idx, acc_trdvol, acc_trdval, mktcap, source, fetched_at"
+        ),
+        from_clause="krx_index_daily",
+        order_columns=("fetched_at", "bas_dd", "index_group", "idx_nm"),
+        insert_columns=(
+            "bas_dd",
+            "index_group",
+            "idx_nm",
+            "idx_clss",
+            "close_idx",
+            "chg_idx",
+            "fluc_rt",
+            "open_idx",
+            "high_idx",
+            "low_idx",
+            "acc_trdvol",
+            "acc_trdval",
+            "mktcap",
+            "source",
+            "fetched_at",
+        ),
+        conflict_columns=("bas_dd", "index_group", "idx_nm"),
+        update_columns=(
+            "idx_clss",
+            "close_idx",
+            "chg_idx",
+            "fluc_rt",
+            "open_idx",
+            "high_idx",
+            "low_idx",
+            "acc_trdvol",
+            "acc_trdval",
+            "mktcap",
+            "source",
+            "fetched_at",
+        ),
+        local_cursor_sql=(
+            "SELECT fetched_at, bas_dd, index_group, idx_nm "
+            "FROM krx_index_daily "
+            "ORDER BY fetched_at DESC, bas_dd DESC, index_group DESC, idx_nm DESC "
+            "LIMIT 1"
+        ),
+        cursor_indexes=(14, 0, 1, 2),
+        copy_merge_enabled=True,
+        conflict_update_where_sql="krx_index_daily.fetched_at <= EXCLUDED.fetched_at",
     ),
     TableSyncSpec(
         name="krx_security_flow_raw",

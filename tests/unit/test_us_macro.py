@@ -82,6 +82,13 @@ def test_series_list_covers_the_five_axes():
     # 신용 스프레드를 term spread로 대체하면 안 된다 (연구 §1)
     assert fred.FRED_SERIES["T10Y2Y"] == "금리"
     assert fred.FRED_SERIES["BAMLH0A0HYM2"] == "신용"
+    for sid, axis in {
+        "DGS3MO": "금리",
+        "DGS30": "금리",
+        "DFII10": "금리",
+        "DCOILBRENTEU": "유가",
+    }.items():
+        assert fred.FRED_SERIES[sid] == axis
 
 
 # --- Wikipedia ---------------------------------------------------------------

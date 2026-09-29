@@ -87,6 +87,18 @@ def test_default_common_feature_series_policies_match_pit_contract() -> None:
     assert series_by_id["rate_kr_gov3y"].availability_policy == "next_krx_session"
     assert series_by_id["rate_kr_gov10y"].availability_policy == "next_krx_session"
     assert series_by_id["rate_kr_gov10y"].source_timezone == "Asia/Seoul"
+    for sid in (
+        "rate_kr_cd91",
+        "market_kospi_ecos",
+        "market_kosdaq_ecos",
+        "trdval_kospi_ecos",
+        "trdval_kosdaq_ecos",
+        "foreign_net_kospi_ecos",
+        "foreign_net_kosdaq_ecos",
+        "mktcap_kospi_ecos",
+    ):
+        assert series_by_id[sid].availability_policy == "next_krx_session", sid
+        assert series_by_id[sid].active, sid
     assert series_by_id["macro_cpi"].availability_policy == "manual_lag_days"
     assert series_by_id["macro_cpi"].manual_lag_days == 20
 
@@ -112,6 +124,14 @@ def test_default_common_feature_series_declares_stale_limits() -> None:
         "rate_us10y",
         "rate_kr_gov3y",
         "rate_kr_gov10y",
+        "rate_kr_cd91",
+        "market_kospi_ecos",
+        "market_kosdaq_ecos",
+        "trdval_kospi_ecos",
+        "trdval_kosdaq_ecos",
+        "foreign_net_kospi_ecos",
+        "foreign_net_kosdaq_ecos",
+        "mktcap_kospi_ecos",
     )
     for series_id in daily:
         limit = series_by_id[series_id].max_stale_business_days

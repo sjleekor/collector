@@ -21,6 +21,7 @@ uv run collector db init
 uv run collector universe sync --source krx-openapi --markets kospi,kosdaq
 uv run collector prices backfill --market all
 uv run collector prices backfill --market all --incremental   # 이후 실행
+uv run collector index sync --source krx-openapi --incremental --lookback-days 7   # KRX 업종·규모·대표지수 일별 (kospi/kosdaq/krx)
 uv run collector validate --date 2026-01-15 --market all
 ```
 
@@ -59,7 +60,7 @@ uv run black src/ tests/
 | `common sync --sources ecos` | `ECOS_API_KEY` |
 | `common sync --sources fred` | `FRED_API_KEY` |
 | `flows sync-kis` | `KIS_APP_KEY`, `KIS_APP_SECRET` |
-| `universe sync --source krx-openapi`, `prices market-cap-backfill` | `AUTH_KEYS` (KRX Open API) |
+| `universe sync --source krx-openapi`, `prices market-cap-backfill`, `index sync` | `AUTH_KEYS` (KRX Open API) |
 | `db sync-remote`, `db with-remote-dsn` | `REMOTE_DB_INFO_PATH` (없으면 `--db-info-path`) |
 
 ## KIS / KRX Open API 데이터 이용 범위

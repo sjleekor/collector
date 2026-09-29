@@ -96,6 +96,7 @@ class RunType(StrEnum):
     UNIVERSE_SNAPSHOT_BACKFILL = "universe_snapshot_backfill"
     DAILY_BACKFILL = "daily_backfill"
     MARKET_CAP_BACKFILL = "market_cap_backfill"
+    INDEX_SYNC = "index_sync"
     VALIDATE = "validate"
     REMOTE_DB_SYNC = "remote_db_sync"
     DART_CORP_SYNC = "dart_corp_sync"

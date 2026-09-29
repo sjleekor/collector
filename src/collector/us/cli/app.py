@@ -45,6 +45,7 @@ def _handle_daily_run(args: argparse.Namespace) -> None:
         budget_seconds=args.budget_seconds,
         sources=sources,
         dry_run=args.dry_run,
+        force_weekly=args.force_weekly,
     )
     _print(result)
     if not result["ok"]:
@@ -214,6 +215,11 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     )
     daily_run.add_argument("--sources", default=None, help="쉼표로 고른다.")
     daily_run.add_argument("--dry-run", action="store_true", help="할 일만 센다.")
+    daily_run.add_argument(
+        "--force-weekly",
+        action="store_true",
+        help="주간 원천(FRED·Wikipedia)의 7일 문턱을 건너뛰고 지금 받는다.",
+    )
     daily_run.set_defaults(handler=_handle_daily_run)
 
     cal_parser = subparsers.add_parser("us-calendar", help="거래일 캘린더 (04 C5).")

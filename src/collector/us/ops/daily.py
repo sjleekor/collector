@@ -378,9 +378,17 @@ def run_sec_13f(root: DataRoot, *, budget: _Budget, dry_run: bool = False) -> So
 
 
 def run_weekly_macro(
-    root: DataRoot, *, today: dt.date, snapshot_date: dt.date | str, dry_run: bool = False
+    root: DataRoot,
+    *,
+    today: dt.date,
+    snapshot_date: dt.date | str,
+    dry_run: bool = False,
+    force: bool = False,
 ) -> SourceRun:
-    """FRED·Wikipedia. 주 1회다 (05 §4). **FRED vintage는 매번 새로 받는다.**"""
+    """FRED·Wikipedia. 주 1회다 (05 §4). **FRED vintage는 매번 새로 받는다.**
+
+    ``force``는 나이 문턱을 건너뛰고 두 원천을 다 받는다. 새 시리즈를 바로 채울 때 쓴다.
+    """
     from collector.us.store.writer import latest_snapshot
 
     run = SourceRun("weekly_macro")
@@ -389,7 +397,8 @@ def run_weekly_macro(
     stale = [
         table
         for table in ("macro_series", "index_constituents")
-        if (path := latest_snapshot(root, table)) is None
+        if force
+        or (path := latest_snapshot(root, table)) is None
         or _age_days(path, today) >= WEEKLY_MAX_AGE_DAYS
     ]
     run.skipped = 2 - len(stale)
@@ -441,6 +450,7 @@ def run_daily(
     budget_seconds: float | None = DEFAULT_BUDGET_SECONDS,
     sources: tuple[str, ...] | None = None,
     dry_run: bool = False,
+    force_weekly: bool = False,
 ) -> dict[str, object]:
     """하루치를 받는다. **어제까지가 대상이다** — 오늘 것은 아직 안 나온다.
 
@@ -478,7 +488,11 @@ def run_daily(
         elif name == "weekly_macro":
             runs.append(
                 run_weekly_macro(
-                    root, today=today, snapshot_date=snapshot_date, dry_run=dry_run
+                    root,
+                    today=today,
+                    snapshot_date=snapshot_date,
+                    dry_run=dry_run,
+                    force=force_weekly,
                 )
             )
         else:
