@@ -320,6 +320,7 @@ date_month_tables=(
   krx_security_flow_raw
   daily_ohlcv
   daily_market_cap
+  krx_index_daily
 )
 
 non_resumable_tables=(
