@@ -758,21 +758,22 @@ CREATE INDEX IF NOT EXISTS ix_dart_capital_change_raw_sync_cursor
 -- One row per (date, index group, index name).  index_group is the endpoint
 -- (kospi | kosdaq | krx) because the same name can appear in more than one.
 -- History starts 2010-01-04.  Same-day data is not published, so the newest
--- row is always a previous session.
+-- row is always a previous session.  NUMERIC(30, 4): the raw parquet exporter
+-- refuses NUMERIC without precision (2026-09-30, migration 20260930_*).
 CREATE TABLE IF NOT EXISTS krx_index_daily (
     bas_dd       DATE        NOT NULL,
     index_group  TEXT        NOT NULL,   -- kospi | kosdaq | krx
     idx_clss     TEXT,
     idx_nm       TEXT        NOT NULL,
-    close_idx    NUMERIC,
-    chg_idx      NUMERIC,
-    fluc_rt      NUMERIC,
-    open_idx     NUMERIC,
-    high_idx     NUMERIC,
-    low_idx      NUMERIC,
+    close_idx    NUMERIC(30, 4),
+    chg_idx      NUMERIC(30, 4),
+    fluc_rt      NUMERIC(30, 4),
+    open_idx     NUMERIC(30, 4),
+    high_idx     NUMERIC(30, 4),
+    low_idx      NUMERIC(30, 4),
     acc_trdvol   BIGINT,
-    acc_trdval   NUMERIC,
-    mktcap       NUMERIC,
+    acc_trdval   NUMERIC(30, 4),
+    mktcap       NUMERIC(30, 4),
     fetched_at   TIMESTAMPTZ NOT NULL,
     source       TEXT        NOT NULL DEFAULT 'krx_openapi',
     PRIMARY KEY (bas_dd, index_group, idx_nm)

@@ -61,12 +61,12 @@ output_partitions = ["year(trade_date)", "month(trade_date)"]
 order_by = ["trade_date", "ticker", "market"]
 
 # KRX Open API 지수 일별 (collector v0.15.13, 2026-09-30). PK (bas_dd, index_group, idx_nm)
+# date_month 전략은 exporter가 trade_date 전용이라(export.rs) full_table로 뺀다. 50만 행이라 한 번에 받는다.
 [[tables]]
 name = "krx_index_daily"
 priority = "P1"
-extract_strategy = "date_month"
-date_column = "bas_dd"
-output_partitions = ["year(bas_dd)", "month(bas_dd)"]
+extract_strategy = "full_table"
+output_partitions = ["index_group"]
 order_by = ["bas_dd", "index_group", "idx_nm"]
 
 [[tables]]
