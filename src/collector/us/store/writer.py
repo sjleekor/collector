@@ -135,6 +135,7 @@ def verify_snapshot(
     table: str,
     *,
     unique_on: tuple[str, ...] | None = None,
+    connection=None,
 ) -> dict[str, object]:
     """이미 쓴 파일이 계약에 맞는지 본다 — 흘려 쓴 경로용.
 
@@ -163,24 +164,28 @@ def verify_snapshot(
     if mismatched:
         raise ValueError(f"{table}: 타입이 계약과 다르다 — " + "; ".join(mismatched))
 
-    con = duckdb.connect()
-    src = f"read_parquet('{path}')"
-    nulls = con.execute(
-        f"SELECT count(*) FROM {src} WHERE "
-        + " OR ".join(f"{c} IS NULL" for c in PROVENANCE_REQUIRED)
-    ).fetchone()[0]
-    if nulls:
-        raise MissingProvenanceError(f"{table}: 출처 컬럼이 비어 있는 행 {nulls:,}개")
+    con = connection if connection is not None else duckdb.connect()
+    try:
+        src = f"read_parquet('{path}')"
+        nulls = con.execute(
+            f"SELECT count(*) FROM {src} WHERE "
+            + " OR ".join(f"{c} IS NULL" for c in PROVENANCE_REQUIRED)
+        ).fetchone()[0]
+        if nulls:
+            raise MissingProvenanceError(f"{table}: 출처 컬럼이 비어 있는 행 {nulls:,}개")
 
-    rows = con.execute(f"SELECT count(*) FROM {src}").fetchone()[0]
-    if unique_on:
-        keys = ", ".join(unique_on)
-        distinct = con.execute(f"SELECT count(DISTINCT ({keys})) FROM {src}").fetchone()[0]
-        if distinct != rows:
-            raise ValueError(
-                f"{table}: 파일 안에서 ({keys}) 가 유일하지 않다 — "
-                f"{rows:,}행 중 {distinct:,}개 (03 §3.1)"
-            )
+        rows = con.execute(f"SELECT count(*) FROM {src}").fetchone()[0]
+        if unique_on:
+            keys = ", ".join(unique_on)
+            distinct = con.execute(f"SELECT count(DISTINCT ({keys})) FROM {src}").fetchone()[0]
+            if distinct != rows:
+                raise ValueError(
+                    f"{table}: 파일 안에서 ({keys}) 가 유일하지 않다 — "
+                    f"{rows:,}행 중 {distinct:,}개 (03 §3.1)"
+                )
+    finally:
+        if connection is None:
+            con.close()
     return {"rows": rows, "bytes": path.stat().st_size}
 
 

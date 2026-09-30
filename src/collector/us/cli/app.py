@@ -147,6 +147,15 @@ def _handle_universe_rebuild(args: argparse.Namespace) -> None:
     )
 
 
+def _handle_universe_incremental(args: argparse.Namespace) -> None:
+    from collector.us.universe import build
+
+    _print(build.build_universe_incremental(
+        _root(args), snapshot_date=_snapshot_date(args),
+        if_new=args.if_new, dry_run=args.dry_run,
+    ))
+
+
 def _handle_nasdaq_analyst_run(args: argparse.Namespace) -> None:
     from collector.us.ops import nasdaq_analyst
 
@@ -310,6 +319,23 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     uni_build.add_argument("--start", default="2018-09-07")
     uni_build.add_argument("--end", default=None)
     uni_build.set_defaults(handler=_handle_universe_rebuild)
+    uni_extend = _common(
+        uni_sub.add_parser(
+            "incremental",
+            help="이전 완료 snapshot과 월 membership을 seed로 새 US 세션만 확장한다.",
+        )
+    )
+    uni_extend.add_argument(
+        "--if-new",
+        action="store_true",
+        help="새 XNYS 세션이 없거나 같은 snapshot_date 파티션이 있으면 skipped로 끝낸다.",
+    )
+    uni_extend.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="검사만 하고 snapshot을 쓰지 않는다.",
+    )
+    uni_extend.set_defaults(handler=_handle_universe_incremental)
 
     prune_parser = _common(
         subparsers.add_parser(

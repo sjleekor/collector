@@ -13,6 +13,38 @@ from __future__ import annotations
 import datetime as _dt
 from pathlib import Path
 
+
+def _bounded_duckdb(root, *, bounded: bool = True):
+    """Open DuckDB under the shared sj2-server resource budget.
+
+    ``SDC_US_DUCKDB_MEMORY_LIMIT`` and ``SDC_US_DUCKDB_THREADS`` override the
+    defaults. ``bounded=False`` (the full rebuild) applies no limit unless one
+    of them is set, which keeps the historical unlimited behavior. Incremental
+    runs default to ``4GB`` and ``2`` threads.
+    """
+    import os
+
+    import duckdb
+
+    memory = os.environ.get("SDC_US_DUCKDB_MEMORY_LIMIT") or ("4GB" if bounded else None)
+    threads = os.environ.get("SDC_US_DUCKDB_THREADS") or ("2" if bounded else None)
+    if memory is None and threads is None:
+        return duckdb.connect()
+    config: dict[str, str] = {}
+    if threads is not None:
+        config["threads"] = str(threads)
+    if memory is not None:
+        # Spill files go under ``output/``, never ``derived/``: the Mac mirror
+        # (``us-mirror.sh``) pulls ``derived/`` with ``--delete`` and would copy
+        # leftovers from an aborted run. ``output/`` is not mirrored except
+        # ``output/scan``.
+        temporary = root.output / "duckdb_tmp" / "universe"
+        temporary.mkdir(parents=True, exist_ok=True)
+        config["memory_limit"] = str(memory)
+        config["temp_directory"] = str(temporary)
+    return duckdb.connect(config=config)
+
+
 #: 진입·유지 문턱 (03 §5.3). 유지가 낮아 경계에서 덜 흔들린다.
 ENTRY_ADV_USD = 1_000_000
 MAINTAIN_ADV_USD = 700_000
@@ -249,6 +281,13 @@ def build_universe_daily(
     start: str = "2018-09-07",
     end: str | None = None,
     observed_at=None,
+    seed_previous_members: set[str] | None = None,
+    fixed_month_members: dict[str, set[str]] | None = None,
+    prefix_snapshot: Path | None = None,
+    resolved_inputs: dict[str, Path] | None = None,
+    destination_path: Path | None = None,
+    ticker_source_paths: list[Path] | None = None,
+    bounded: bool = False,
 ) -> dict[str, object]:
     """``universe_daily``를 굳힌다.
 
@@ -262,240 +301,489 @@ def build_universe_daily(
     **영원히 그 날짜에서 끊긴다.** 2026-09-21 재판정이 실제로 그랬다:
     가격은 09-18 까지인데 결과가 09-09 에서 멈췄다.
     """
-    import duckdb
-
     from collector.us.store.writer import snapshot_path, verify_snapshot
 
     observed_at = observed_at or _dt.datetime.now(_dt.UTC)
-    con = duckdb.connect()
+    con = _bounded_duckdb(root, bounded=bounded)
 
-    resolved = resolve_inputs(root)
-    inputs = {n: p.parent.name.removeprefix("snapshot_date=") for n, p in resolved.items()}
-    for name, path in resolved.items():
-        con.execute(f"CREATE VIEW {name} AS SELECT * FROM read_parquet('{path}')")
+    try:
+        resolved = resolved_inputs if resolved_inputs is not None else resolve_inputs(root)
+        inputs = {n: p.parent.name.removeprefix("snapshot_date=") for n, p in resolved.items()}
+        for name, path in resolved.items():
+            con.execute(f"CREATE VIEW {name} AS SELECT * FROM read_parquet('{path}')")
 
-    if end is None:
-        end = str(con.execute("SELECT max(date) FROM prices_daily").fetchone()[0])
-    # **티커 → CIK 는 PIT 다** (2026-09-21). 오늘자 맵 한 벌을 쓰면
-    # 상폐·피인수·개명한 회사가 통째로 빠져 `cik` 이 붙었나가 곧 "2026년에도
-    # 살아 있나"가 된다 — 끝까지 남은 종목 98.9% 대 사라진 종목 26.5%.
-    # 아래 ASOF 조인이 `date >= as_of` 중 최신 스냅샷을 쓴다.
+        if end is None:
+            end = str(con.execute("SELECT max(date) FROM prices_daily").fetchone()[0])
+        # **티커 → CIK 는 PIT 다** (2026-09-21). 오늘자 맵 한 벌을 쓰면
+        # 상폐·피인수·개명한 회사가 통째로 빠져 `cik` 이 붙었나가 곧 "2026년에도
+        # 살아 있나"가 된다 — 끝까지 남은 종목 98.9% 대 사라진 종목 26.5%.
+        # 아래 ASOF 조인이 `date >= as_of` 중 최신 스냅샷을 쓴다.
+        from collector.us.sources import wayback
+
+        ticker_rows = wayback.ticker_cik_map(root, source_paths=ticker_source_paths)
+        import pyarrow as pa
+
+        # DuckDB executemany inserts one row at a time and took over ten
+        # minutes for the historical Wayback PIT map. Register one Arrow batch
+        # so the same rows enter DuckDB through a vectorized scan.
+        ticker_table = pa.table({
+            "symbol": pa.array([row[0] for row in ticker_rows], type=pa.string()),
+            "cik": pa.array([row[1] for row in ticker_rows], type=pa.int64()),
+            "as_of": pa.array([row[2] for row in ticker_rows], type=pa.date32()),
+        })
+        con.register("company_tickers_arrow", ticker_table)
+        # ASOF 조인은 오른쪽이 키별로 정렬돼 있어야 싸다.
+        con.execute(
+            "CREATE TABLE ticker_pit AS "
+            "SELECT symbol, cik, as_of FROM company_tickers_arrow ORDER BY symbol, as_of"
+        )
+        con.unregister("company_tickers_arrow")
+        del ticker_table
+
+        # dolt symbol 의 현재값. Wayback 이 그 날짜를 못 덮을 때만 쓴다 — PIT 는
+        # 아니지만 "모르면 FALSE" 보다 낫다. ZWZZT(나스닥 테스트 심볼)와
+        # SGOV(ETF)가 그 틈으로 들어왔었다 (2026-09-19).
+        dolt_symbol = root.raw / "dolt" / "stocks"
+        con.execute(
+            "CREATE TABLE symbol_current (symbol VARCHAR, is_etf BOOLEAN, "
+            "test_issue BOOLEAN, security_name VARCHAR)"
+        )
+        if (dolt_symbol / ".dolt").is_dir():
+            import subprocess
+
+            proc = subprocess.run(
+                [
+                    "dolt",
+                    "sql",
+                    "-q",
+                    "select act_symbol, is_etf, is_test_issue, security_name from symbol",
+                    "-r",
+                    "csv",
+                ],
+                cwd=dolt_symbol,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            import csv as _csv
+            import io as _io
+
+            reader = _csv.DictReader(_io.StringIO(proc.stdout))
+            con.executemany(
+                "INSERT INTO symbol_current VALUES (?, ?, ?, ?)",
+                [
+                    (
+                        r["act_symbol"],
+                        (r["is_etf"] or "0") not in ("0", ""),
+                        (r["is_test_issue"] or "0") not in ("0", ""),
+                        r["security_name"],
+                    )
+                    for r in reader
+                ],
+            )
+
+        warmup_start = (_dt.date.fromisoformat(start) - _dt.timedelta(days=WARMUP_DAYS)).isoformat()
+        # 원천에 비정규장 데이터가 섞여 있다 — 2020-02-17(Presidents' Day)에 3,432행이
+        # 있었다 (2026-09-19 확인). 거래소 캘린더로 거른다.
+        import exchange_calendars as _xcals
+
+        _cal = _xcals.get_calendar("XNYS")
+        sessions = [d.date().isoformat() for d in _cal.sessions_in_range(start, end)]
+        # 예열 구간의 세션도 필요하다 — 판정 바닥이 거기까지 간다.
+        sessions_all = [d.date().isoformat() for d in _cal.sessions_in_range(warmup_start, end)]
+        con.execute("CREATE TABLE xnys_sessions (date DATE)")
+        con.executemany("INSERT INTO xnys_sessions VALUES (?)", [(d,) for d in sessions])
+        con.execute("CREATE TABLE xnys_sessions_all (date DATE)")
+        con.executemany("INSERT INTO xnys_sessions_all VALUES (?)", [(d,) for d in sessions_all])
+        con.execute("CREATE VIEW trading_days AS SELECT date FROM xnys_sessions")
+        # 예열 구간까지 읽어 롤링을 채운 뒤, 검정 구간만 남긴다.
+        con.execute(
+            "CREATE TABLE daily_base_warm AS " + daily_base_sql(warmup_start=warmup_start, end=end)
+        )
+        # **판정에 쓰는 바닥은 예열 구간까지 포함한다.** 달 M 의 멤버십이 M-1 을
+        # 보므로, 첫 달(2018-09)의 근거가 될 2018-08 이 여기 있어야 한다.
+        # 세션 필터는 둘 다 건다 — 원천에 비정규장 데이터가 섞여 있다.
+        con.execute(
+            "CREATE TABLE daily_base_judge AS SELECT w.* FROM daily_base_warm w "
+            "JOIN xnys_sessions_all s ON s.date = w.date"
+        )
+        con.execute(
+            "CREATE TABLE daily_base AS SELECT * FROM daily_base_judge "
+            f"WHERE date >= DATE '{start}'"
+        )
+        dropped = con.execute(
+            f"SELECT count(DISTINCT date) FROM daily_base_warm w "
+            f"WHERE w.date >= DATE '{start}' "
+            f"AND NOT EXISTS (SELECT 1 FROM xnys_sessions s WHERE s.date = w.date)"
+        ).fetchone()[0]
+
+        # 한 as_of 에 같은 symbol 이 두 갈래로 오면 하나만 남긴다 (드물다).
+        con.execute("""
+            CREATE TABLE listing_flat AS
+            SELECT * EXCLUDE (rn) FROM (
+                SELECT *, row_number() OVER (PARTITION BY symbol, as_of ORDER BY kind) AS rn
+                FROM listing_snapshots
+            ) WHERE rn = 1
+            """)
+        con.execute("""
+            CREATE TABLE listing_daily AS
+            SELECT b.date, b.symbol, l.as_of AS listing_as_of,
+                   date_diff('day', l.as_of, b.date) AS listing_age_days,
+                   l.kind,
+                   COALESCE(l.security_name, sc.security_name) AS security_name,
+                   l.exchange, l.market_category,
+                   -- Wayback PIT 값이 있으면 그것, 없으면 dolt 현재값.
+                   COALESCE(l.is_etf, sc.is_etf)           AS is_etf,
+                   COALESCE(l.test_issue, sc.test_issue)   AS test_issue,
+                   (l.is_etf IS NULL AND sc.is_etf IS NOT NULL) AS flags_from_current,
+                   l.financial_status
+            FROM daily_base_judge b
+            ASOF LEFT JOIN listing_flat l
+              ON b.symbol = l.symbol AND b.date >= l.as_of
+            LEFT JOIN symbol_current sc ON sc.symbol = b.symbol
+            """)
+
+        con.execute(
+            "CREATE TABLE monthly AS " + monthly_candidates_sql(base="daily_base_judge")
+        )
+
+        # --- 월 재판정 이어달리기 (03 §5.3) ---------------------------------
+        #
+        # **달 M 의 멤버십은 달 M-1 의 통계로 정한다** (JUDGE_LAG_MONTHS).
+        # 패널이 그 달 첫 거래일을 리밸런스일로 쓰므로, 달 M 자신의 중앙값으로
+        # 정하면 그 시점에 알 수 없는 것을 쓰게 된다 (06_universe_lookahead.md).
+        target_months = [
+            r[0].date() if isinstance(r[0], _dt.datetime) else r[0]
+            for r in con.execute(
+                "SELECT DISTINCT date_trunc('month', date) AS ym FROM daily_base ORDER BY ym"
+            ).fetchall()
+        ]
+        con.execute("CREATE TABLE membership (ym DATE, symbol VARCHAR)")
+        prev: set[str] = set(seed_previous_members or ())
+        unjudged: list[str] = []
+        for ym in target_months:
+            if fixed_month_members and str(ym) in fixed_month_members:
+                keep = fixed_month_members[str(ym)]
+                if keep:
+                    con.executemany(
+                        "INSERT INTO membership VALUES (?, ?)", [(ym, s) for s in sorted(keep)]
+                    )
+                prev = keep
+                continue
+            src = _shift_months(ym, -JUDGE_LAG_MONTHS)
+            rows = con.execute(
+                """
+                SELECT symbol, adv_20d, traded_days_20, etf_assumed, test_assumed, name_excluded
+                FROM monthly WHERE ym = ?
+                """,
+                [src],
+            ).fetchall()
+            if not rows:
+                # 근거가 될 달이 없다. **조용히 빈 달로 두지 않는다** — 결과에 적는다.
+                unjudged.append(str(ym))
+                prev = set()
+                continue
+            keep = set()
+            for symbol, adv, traded, is_etf, is_test, excluded in rows:
+                if is_etf or is_test or excluded:
+                    continue
+                if adv is None or (traded or 0) < MIN_TRADED_DAYS_20:
+                    continue
+                threshold = MAINTAIN_ADV_USD if symbol in prev else ENTRY_ADV_USD
+                if adv >= threshold:
+                    keep.add(symbol)
+            if keep:
+                con.executemany(
+                    "INSERT INTO membership VALUES (?, ?)", [(ym, s) for s in sorted(keep)]
+                )
+            prev = keep
+
+        if prefix_snapshot is not None and unjudged:
+            raise ValueError(f"incremental universe has unjudged months: {unjudged}")
+
+        dest = destination_path or snapshot_path(root, "universe_daily", snapshot_date)
+        if dest.exists():
+            raise FileExistsError(f"universe_daily snapshot already exists: {dest}")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        import os
+
+        temporary_dest = dest.parent / f".part.{os.getpid()}.parquet"
+        if temporary_dest.exists():
+            raise FileExistsError(
+                f"universe_daily temporary snapshot already exists: {temporary_dest}"
+            )
+        ticker_pit_join = TICKER_PIT_JOIN.format(left="b")
+        prefix_sql = (
+            "SELECT date, symbol, cik, in_prices, in_listing, listing_source, is_etf, "
+            "test_issue, exchange, sic, sic_source, mcap_rank, adv_20d, in_universe, "
+            "usable_from, observed_at "
+            f"FROM read_parquet('{prefix_snapshot}') WHERE date < DATE '{start}' UNION ALL "
+            if prefix_snapshot is not None else ""
+        )
+        con.execute(
+            f"""
+            COPY (
+                {prefix_sql}
+                SELECT
+                    b.date,
+                    b.symbol,
+                    ct.cik,
+                    TRUE                                   AS in_prices,
+                    (ld.listing_as_of IS NOT NULL)         AS in_listing,
+                    CASE WHEN ld.listing_as_of IS NULL THEN 'none'
+                         WHEN ld.listing_age_days <= 120  THEN 'wayback'
+                         ELSE 'wayback_stale' END          AS listing_source,
+                    COALESCE(ld.is_etf, FALSE)             AS is_etf,
+                    COALESCE(ld.test_issue, FALSE)         AS test_issue,
+                    ld.exchange,
+                    f.sic,
+                    CASE WHEN f.sic IS NULL THEN NULL ELSE 'sec_sub' END AS sic_source,
+                    CAST(md.mcap_rank AS INTEGER)          AS mcap_rank,
+                    b.adv_20d,
+                    (m.symbol IS NOT NULL)                 AS in_universe,
+                    DATE '{USABLE_FROM.isoformat()}'       AS usable_from,
+                    CAST(? AS TIMESTAMP WITH TIME ZONE)    AS observed_at
+                FROM daily_base b
+                LEFT JOIN listing_daily ld ON ld.date = b.date AND ld.symbol = b.symbol
+                {ticker_pit_join}
+                LEFT JOIN membership m
+                       ON m.ym = date_trunc('month', b.date) AND m.symbol = b.symbol
+                LEFT JOIN midas_security_daily md
+                       ON md.date = b.date AND md.ticker = b.symbol
+                      AND md.security_type = 'Stock'
+                LEFT JOIN LATERAL (
+                    SELECT sic FROM filings_sub fs
+                    WHERE fs.cik = ct.cik AND fs.filed <= b.date AND fs.sic IS NOT NULL
+                    ORDER BY fs.filed DESC LIMIT 1
+                ) f ON TRUE
+            ) TO '{temporary_dest}' (FORMAT PARQUET, COMPRESSION ZSTD)
+            """,
+            [observed_at],
+        )
+        stats = verify_snapshot(temporary_dest, "universe_daily", unique_on=("date", "symbol"),
+                                connection=con)
+        os.link(temporary_dest, dest)
+        temporary_dest.unlink()
+        # **무엇으로 만들었는지 같이 남긴다.** 입력 스냅샷이 표마다 다른 날짜일
+        # 수 있으므로 어느 것을 썼는지 적어야 재현이 된다.
+        ticker_as_of = sorted({row[2] for row in ticker_rows})
+        return {
+            "path": dest,
+            "months": len(target_months),
+            "sessions": len(sessions),
+            "non_session_dates_dropped": dropped,
+            "input_snapshots": inputs,
+            "start": start,
+            "end": end,
+            "judge_lag_months": JUDGE_LAG_MONTHS,
+            "unjudged_months": unjudged,
+            "ticker_map_snapshots": len(ticker_as_of),
+            "ticker_map_first": str(ticker_as_of[0]) if ticker_as_of else None,
+            "ticker_map_last": str(ticker_as_of[-1]) if ticker_as_of else None,
+            "prefix_snapshot": str(prefix_snapshot) if prefix_snapshot else None,
+            "seed_previous_members": len(seed_previous_members or ()),
+            "fixed_months": sorted((fixed_month_members or {}).keys()),
+            **stats,
+        }
+    finally:
+        con.close()
+
+
+def build_universe_incremental(
+    root, *, snapshot_date, observed_at=None, if_new: bool = False, dry_run: bool = False
+) -> dict[str, object]:
+    """Extend a complete prior snapshot while freezing established month members.
+
+    The prior last session and previous month are required. The output retains
+    every earlier row, records its provenance, and adds only later price dates.
+    An incomplete prior month fails rather than silently resetting hysteresis.
+
+    ``if_new`` turns the two expected no-op cases into a skip result instead of
+    an exception: no new XNYS session, or the ``snapshot_date`` partition
+    already exists. ``dry_run`` runs every check and reports what would be
+    added without writing a snapshot.
+    """
+    import hashlib
+    import json
+    import os
+    import tempfile
+
+    import exchange_calendars as xcals
+
+    from collector.us.store.writer import latest_snapshot, snapshot_path
+
+    def sha(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
     from collector.us.sources import wayback
 
-    ticker_rows = wayback.ticker_cik_map(root)
-    con.execute("CREATE TABLE company_tickers (symbol VARCHAR, cik BIGINT, as_of DATE)")
-    con.executemany("INSERT INTO company_tickers VALUES (?, ?, ?)", ticker_rows)
-    # ASOF 조인은 오른쪽이 키별로 정렬돼 있어야 싸다.
-    con.execute(
-        "CREATE TABLE ticker_pit AS "
-        "SELECT symbol, cik, as_of FROM company_tickers ORDER BY symbol, as_of"
-    )
-
-    # dolt symbol 의 현재값. Wayback 이 그 날짜를 못 덮을 때만 쓴다 — PIT 는
-    # 아니지만 "모르면 FALSE" 보다 낫다. ZWZZT(나스닥 테스트 심볼)와
-    # SGOV(ETF)가 그 틈으로 들어왔었다 (2026-09-19).
-    dolt_symbol = root.raw / "dolt" / "stocks"
-    con.execute(
-        "CREATE TABLE symbol_current (symbol VARCHAR, is_etf BOOLEAN, "
-        "test_issue BOOLEAN, security_name VARCHAR)"
-    )
-    if (dolt_symbol / ".dolt").is_dir():
-        import subprocess
-
-        proc = subprocess.run(
-            [
-                "dolt",
-                "sql",
-                "-q",
-                "select act_symbol, is_etf, is_test_issue, security_name from symbol",
-                "-r",
-                "csv",
-            ],
-            cwd=dolt_symbol,
-            capture_output=True,
-            text=True,
-            check=True,
+    previous = latest_snapshot(root, "universe_daily")
+    input_files = resolve_inputs(root)
+    prices = input_files["prices_daily"]
+    if previous is None or prices is None:
+        raise FileNotFoundError(
+            "incremental universe requires prior universe_daily and prices_daily"
         )
-        import csv as _csv
-        import io as _io
-
-        reader = _csv.DictReader(_io.StringIO(proc.stdout))
-        con.executemany(
-            "INSERT INTO symbol_current VALUES (?, ?, ?, ?)",
-            [
-                (
-                    r["act_symbol"],
-                    (r["is_etf"] or "0") not in ("0", ""),
-                    (r["is_test_issue"] or "0") not in ("0", ""),
-                    r["security_name"],
-                )
-                for r in reader
-            ],
+    destination = snapshot_path(root, "universe_daily", snapshot_date)
+    if destination.parent.exists() and not if_new:
+        raise FileExistsError(f"universe_daily partition already exists: {destination.parent}")
+    con = _bounded_duckdb(root)
+    try:
+        previous_end = con.execute(
+            "SELECT max(date) FROM read_parquet(?)", [str(previous)]
+        ).fetchone()[0]
+        prices_end = con.execute(
+            "SELECT max(date) FROM read_parquet(?)", [str(prices)]
+        ).fetchone()[0]
+        if previous_end is None or prices_end is None or prices_end <= previous_end:
+            if if_new:
+                return {"skipped": True, "reason": "no new price session"}
+            raise ValueError("new completed price session is required")
+        cal = xcals.get_calendar("XNYS")
+        next_sessions = [d.date() for d in cal.sessions_in_range(
+            previous_end + _dt.timedelta(days=1), prices_end
+        )]
+        if not next_sessions:
+            if if_new:
+                return {"skipped": True, "reason": "no new XNYS session"}
+            raise ValueError("no new XNYS session is present")
+        if if_new and destination.parent.exists():
+            return {
+                "skipped": True,
+                "reason": f"universe_daily partition already exists: {destination.parent.name}",
+            }
+        recorded_new_dates = {row[0] for row in con.execute(
+            "SELECT DISTINCT date FROM read_parquet(?) WHERE date > ? AND date <= ?",
+            [str(prices), previous_end, prices_end],
+        ).fetchall()}
+        missing_new_dates = sorted(set(next_sessions) - recorded_new_dates)
+        if missing_new_dates:
+            raise ValueError(f"prices snapshot has missing new XNYS sessions: {missing_new_dates}")
+        start = next_sessions[0]
+        previous_month = _shift_months(start.replace(day=1), -1)
+        prior_month_sessions = [d.date() for d in cal.sessions_in_range(
+            previous_month, start - _dt.timedelta(days=1)
+        ) if d.date().month == previous_month.month]
+        if not prior_month_sessions:
+            raise ValueError("previous month has no confirmed XNYS session")
+        previous_month_last = prior_month_sessions[-1]
+        if previous_end < previous_month_last:
+            raise ValueError("prior universe snapshot does not cover the previous month")
+        expected_prior_dates = {
+            d.date() for d in cal.sessions_in_range(previous_month, previous_end)
+        }
+        recorded_prior_dates = {row[0] for row in con.execute(
+            "SELECT DISTINCT date FROM read_parquet(?) WHERE date BETWEEN ? AND ?",
+            [str(previous), previous_month, previous_end],
+        ).fetchall()}
+        missing_prior_dates = sorted(expected_prior_dates - recorded_prior_dates)
+        if missing_prior_dates:
+            raise ValueError(
+                f"prior universe snapshot has missing XNYS sessions: {missing_prior_dates}"
+            )
+        seed = {row[0] for row in con.execute(
+            "SELECT DISTINCT symbol FROM read_parquet(?) "
+            "WHERE date >= ? AND date < ? AND in_universe",
+            [str(previous), previous_month, start.replace(day=1)],
+        ).fetchall()}
+        if not seed:
+            raise ValueError("previous month membership seed is missing")
+        fixed: dict[str, set[str]] = {}
+        current_month = start.replace(day=1)
+        if previous_end >= current_month:
+            fixed[str(current_month)] = {row[0] for row in con.execute(
+                "SELECT DISTINCT symbol FROM read_parquet(?) "
+                "WHERE date >= ? AND date <= ? AND in_universe",
+                [str(previous), current_month, previous_end],
+            ).fetchall()}
+            if not fixed[str(current_month)]:
+                raise ValueError("current month frozen membership is missing")
+        if dry_run:
+            return {
+                "dry_run": True,
+                "would_build": True,
+                "added_start": start.isoformat(),
+                "added_end": prices_end.isoformat(),
+                "sessions": len(next_sessions),
+            }
+    finally:
+        con.close()
+    ticker_files = sorted(wayback.company_tickers_dir(root).glob("company_tickers_*.json"))
+    ticker_paths = ticker_files or [root.raw / "sec" / "company_tickers" / "company_tickers.json"]
+    if any(not path.is_file() for path in ticker_paths):
+        raise FileNotFoundError("pinned Wayback ticker mapping is missing")
+    ticker_hashes_before = {str(path): sha(path) for path in ticker_paths}
+    input_hashes_before = {name: sha(path) for name, path in input_files.items()}
+    previous_hash = sha(previous)
+    destination.parent.parent.mkdir(parents=True, exist_ok=True)
+    staged_dir = Path(
+        tempfile.mkdtemp(prefix=".universe-incremental-", dir=destination.parent.parent)
+    )
+    import shutil
+    try:
+        staged_part = staged_dir / "part.parquet"
+        result = build_universe_daily(
+            root, snapshot_date=snapshot_date, start=start.isoformat(), end=prices_end.isoformat(),
+            observed_at=observed_at, seed_previous_members=seed,
+            fixed_month_members=fixed, prefix_snapshot=previous,
+            resolved_inputs=input_files, destination_path=staged_part,
+            ticker_source_paths=ticker_files, bounded=True,
         )
-
-    warmup_start = (_dt.date.fromisoformat(start) - _dt.timedelta(days=WARMUP_DAYS)).isoformat()
-    # 원천에 비정규장 데이터가 섞여 있다 — 2020-02-17(Presidents' Day)에 3,432행이
-    # 있었다 (2026-09-19 확인). 거래소 캘린더로 거른다.
-    import exchange_calendars as _xcals
-
-    _cal = _xcals.get_calendar("XNYS")
-    sessions = [d.date().isoformat() for d in _cal.sessions_in_range(start, end)]
-    # 예열 구간의 세션도 필요하다 — 판정 바닥이 거기까지 간다.
-    sessions_all = [d.date().isoformat() for d in _cal.sessions_in_range(warmup_start, end)]
-    con.execute("CREATE TABLE xnys_sessions (date DATE)")
-    con.executemany("INSERT INTO xnys_sessions VALUES (?)", [(d,) for d in sessions])
-    con.execute("CREATE TABLE xnys_sessions_all (date DATE)")
-    con.executemany("INSERT INTO xnys_sessions_all VALUES (?)", [(d,) for d in sessions_all])
-    con.execute("CREATE VIEW trading_days AS SELECT date FROM xnys_sessions")
-    # 예열 구간까지 읽어 롤링을 채운 뒤, 검정 구간만 남긴다.
-    con.execute(
-        "CREATE TABLE daily_base_warm AS " + daily_base_sql(warmup_start=warmup_start, end=end)
-    )
-    # **판정에 쓰는 바닥은 예열 구간까지 포함한다.** 달 M 의 멤버십이 M-1 을
-    # 보므로, 첫 달(2018-09)의 근거가 될 2018-08 이 여기 있어야 한다.
-    # 세션 필터는 둘 다 건다 — 원천에 비정규장 데이터가 섞여 있다.
-    con.execute(
-        "CREATE TABLE daily_base_judge AS SELECT w.* FROM daily_base_warm w "
-        "JOIN xnys_sessions_all s ON s.date = w.date"
-    )
-    con.execute(
-        f"CREATE TABLE daily_base AS SELECT * FROM daily_base_judge WHERE date >= DATE '{start}'"
-    )
-    dropped = con.execute(
-        f"SELECT count(DISTINCT date) FROM daily_base_warm w "
-        f"WHERE w.date >= DATE '{start}' "
-        f"AND NOT EXISTS (SELECT 1 FROM xnys_sessions s WHERE s.date = w.date)"
-    ).fetchone()[0]
-
-    # 한 as_of 에 같은 symbol 이 두 갈래로 오면 하나만 남긴다 (드물다).
-    con.execute("""
-        CREATE TABLE listing_flat AS
-        SELECT * EXCLUDE (rn) FROM (
-            SELECT *, row_number() OVER (PARTITION BY symbol, as_of ORDER BY kind) AS rn
-            FROM listing_snapshots
-        ) WHERE rn = 1
-        """)
-    con.execute("""
-        CREATE TABLE listing_daily AS
-        SELECT b.date, b.symbol, l.as_of AS listing_as_of,
-               date_diff('day', l.as_of, b.date) AS listing_age_days,
-               l.kind,
-               COALESCE(l.security_name, sc.security_name) AS security_name,
-               l.exchange, l.market_category,
-               -- Wayback PIT 값이 있으면 그것, 없으면 dolt 현재값.
-               COALESCE(l.is_etf, sc.is_etf)           AS is_etf,
-               COALESCE(l.test_issue, sc.test_issue)   AS test_issue,
-               (l.is_etf IS NULL AND sc.is_etf IS NOT NULL) AS flags_from_current,
-               l.financial_status
-        FROM daily_base_judge b
-        ASOF LEFT JOIN listing_flat l
-          ON b.symbol = l.symbol AND b.date >= l.as_of
-        LEFT JOIN symbol_current sc ON sc.symbol = b.symbol
-        """)
-
-    con.execute(
-        "CREATE TABLE monthly AS " + monthly_candidates_sql(base="daily_base_judge")
-    )
-
-    # --- 월 재판정 이어달리기 (03 §5.3) ---------------------------------
-    #
-    # **달 M 의 멤버십은 달 M-1 의 통계로 정한다** (JUDGE_LAG_MONTHS).
-    # 패널이 그 달 첫 거래일을 리밸런스일로 쓰므로, 달 M 자신의 중앙값으로
-    # 정하면 그 시점에 알 수 없는 것을 쓰게 된다 (06_universe_lookahead.md).
-    target_months = [
-        r[0]
-        for r in con.execute(
-            "SELECT DISTINCT date_trunc('month', date) AS ym FROM daily_base ORDER BY ym"
-        ).fetchall()
-    ]
-    con.execute("CREATE TABLE membership (ym DATE, symbol VARCHAR)")
-    prev: set[str] = set()
-    unjudged: list[str] = []
-    for ym in target_months:
-        src = _shift_months(ym, -JUDGE_LAG_MONTHS)
-        rows = con.execute(
-            """
-            SELECT symbol, adv_20d, traded_days_20, etf_assumed, test_assumed, name_excluded
-            FROM monthly WHERE ym = ?
-            """,
-            [src],
-        ).fetchall()
-        if not rows:
-            # 근거가 될 달이 없다. **조용히 빈 달로 두지 않는다** — 결과에 적는다.
-            unjudged.append(str(ym))
-            prev = set()
-            continue
-        keep = set()
-        for symbol, adv, traded, is_etf, is_test, excluded in rows:
-            if is_etf or is_test or excluded:
-                continue
-            if adv is None or (traded or 0) < MIN_TRADED_DAYS_20:
-                continue
-            threshold = MAINTAIN_ADV_USD if symbol in prev else ENTRY_ADV_USD
-            if adv >= threshold:
-                keep.add(symbol)
-        if keep:
-            con.executemany("INSERT INTO membership VALUES (?, ?)", [(ym, s) for s in sorted(keep)])
-        prev = keep
-
-    dest = snapshot_path(root, "universe_daily", snapshot_date)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    ticker_pit_join = TICKER_PIT_JOIN.format(left="b")
-    con.execute(
-        f"""
-        COPY (
-            SELECT
-                b.date,
-                b.symbol,
-                ct.cik,
-                TRUE                                   AS in_prices,
-                (ld.listing_as_of IS NOT NULL)         AS in_listing,
-                CASE WHEN ld.listing_as_of IS NULL THEN 'none'
-                     WHEN ld.listing_age_days <= 120  THEN 'wayback'
-                     ELSE 'wayback_stale' END          AS listing_source,
-                COALESCE(ld.is_etf, FALSE)             AS is_etf,
-                COALESCE(ld.test_issue, FALSE)         AS test_issue,
-                ld.exchange,
-                f.sic,
-                CASE WHEN f.sic IS NULL THEN NULL ELSE 'sec_sub' END AS sic_source,
-                CAST(md.mcap_rank AS INTEGER)          AS mcap_rank,
-                b.adv_20d,
-                (m.symbol IS NOT NULL)                 AS in_universe,
-                DATE '{USABLE_FROM.isoformat()}'       AS usable_from,
-                CAST(? AS TIMESTAMP WITH TIME ZONE)    AS observed_at
-            FROM daily_base b
-            LEFT JOIN listing_daily ld ON ld.date = b.date AND ld.symbol = b.symbol
-            {ticker_pit_join}
-            LEFT JOIN membership m
-                   ON m.ym = date_trunc('month', b.date) AND m.symbol = b.symbol
-            LEFT JOIN midas_security_daily md
-                   ON md.date = b.date AND md.ticker = b.symbol
-                  AND md.security_type = 'Stock'
-            LEFT JOIN LATERAL (
-                SELECT sic FROM filings_sub fs
-                WHERE fs.cik = ct.cik AND fs.filed <= b.date AND fs.sic IS NOT NULL
-                ORDER BY fs.filed DESC LIMIT 1
-            ) f ON TRUE
-        ) TO '{dest}' (FORMAT PARQUET, COMPRESSION ZSTD)
-        """,
-        [observed_at],
-    )
-    stats = verify_snapshot(dest, "universe_daily", unique_on=("date", "symbol"))
-    # **무엇으로 만들었는지 같이 남긴다.** 입력 스냅샷이 표마다 다른 날짜일
-    # 수 있으므로 어느 것을 썼는지 적어야 재현이 된다.
-    ticker_as_of = sorted({row[2] for row in ticker_rows})
+        # A prior month's already-published membership is an invariant.  Do
+        # not mistake the presence of fixed_months in the marker for proof
+        # that the SQL lookup actually applied the fixed set.
+        check = _bounded_duckdb(root)
+        try:
+            for month, members in fixed.items():
+                rows = check.execute(
+                    "SELECT symbol, in_universe FROM read_parquet(?) "
+                    "WHERE date >= ? AND date < (?::DATE + INTERVAL 1 MONTH)",
+                    [str(staged_part), max(start, _dt.date.fromisoformat(month)), month],
+                ).fetchall()
+                if not rows or any(bool(in_universe) != (symbol in members)
+                                   for symbol, in_universe in rows):
+                    raise ValueError(f"frozen monthly membership was not applied: {month}")
+        finally:
+            check.close()
+        input_hashes_after = {name: sha(path) for name, path in input_files.items()}
+        if (input_hashes_after != input_hashes_before or sha(previous) != previous_hash or
+                {str(path): sha(path) for path in ticker_paths} != ticker_hashes_before):
+            raise ValueError("universe input snapshot changed during incremental build")
+        # The marker and parquet become visible in one directory rename.
+        manifest = {
+            "schema_version": 1,
+            "table": "universe_daily",
+            "snapshot_date": str(snapshot_date),
+            "snapshot_sha256": sha(staged_part),
+            "previous_snapshot": str(previous),
+            "previous_snapshot_sha256": previous_hash,
+            "previous_end": previous_end.isoformat(),
+            "added_start": start.isoformat(),
+            "added_end": prices_end.isoformat(),
+            "previous_month_seed_count": len(seed),
+            "fixed_months": sorted(fixed),
+            "input_snapshots": result["input_snapshots"],
+            "input_snapshot_sha256": input_hashes_before,
+            "ticker_source_sha256": {
+                str(Path(name).relative_to(root.base)): digest
+                for name, digest in ticker_hashes_before.items()
+            },
+            "unjudged_months": result["unjudged_months"],
+        }
+        if manifest["unjudged_months"]:
+            raise ValueError("incremental universe contains an unjudged month")
+        staged_marker = staged_dir / "completion.json"
+        staged_marker.write_text(json.dumps(manifest, sort_keys=True, indent=2) + "\n")
+        os.rename(staged_dir, destination.parent)
+    except BaseException:
+        shutil.rmtree(staged_dir, ignore_errors=True)
+        raise
     return {
-        "path": dest,
-        "months": len(target_months),
-        "sessions": len(sessions),
-        "non_session_dates_dropped": dropped,
-        "input_snapshots": inputs,
-        "start": start,
-        "end": end,
-        "judge_lag_months": JUDGE_LAG_MONTHS,
-        "unjudged_months": unjudged,
-        "ticker_map_snapshots": len(ticker_as_of),
-        "ticker_map_first": str(ticker_as_of[0]) if ticker_as_of else None,
-        "ticker_map_last": str(ticker_as_of[-1]) if ticker_as_of else None,
-        **stats,
+        **result,
+        "path": destination,
+        "completion_path": destination.parent / "completion.json",
     }

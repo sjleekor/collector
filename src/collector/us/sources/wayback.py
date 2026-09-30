@@ -417,14 +417,20 @@ def parse_company_tickers(path: Path) -> tuple[_dt.date, list[tuple[str, int]]]:
     return as_of, pairs
 
 
-def ticker_cik_map(root) -> list[tuple[str, int, _dt.date]]:
+def ticker_cik_map(
+    root, *, source_paths: list[Path] | None = None
+) -> list[tuple[str, int, _dt.date]]:
     """``[(symbol, cik, as_of)]`` — 과거 스냅샷 전부. **PIT로 쓰라고 만든 것이다.**
 
     스냅샷이 하나도 없으면 오늘자 ``raw/sec/company_tickers/company_tickers.json``
     한 벌로 되돌아간다 — **그건 생존편향이 있는 옛 동작이다.** 되돌아갔다는
     사실은 부르는 쪽이 행 수로 알 수 있다(``as_of``가 한 종류다).
     """
-    files = sorted(company_tickers_dir(root).glob("company_tickers_*.json"))
+    files = (
+        source_paths
+        if source_paths is not None
+        else sorted(company_tickers_dir(root).glob("company_tickers_*.json"))
+    )
     out: list[tuple[str, int, _dt.date]] = []
     seen: set[tuple[str, _dt.date]] = set()
     for path in files:
