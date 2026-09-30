@@ -190,3 +190,34 @@ resume from; re-run the export with `--force` instead.
 `bin/raw-parquet-export-all.sh` handles this distinction automatically (see
 `bin/README.md`), calling `resume` only for the resumable strategies and
 `--force` re-export for the rest.
+
+## sj2 container export (KR 일일 브리핑 입력)
+
+sj2에는 Rust toolchain이 없다. 이미지 빌드(`Dockerfile`의 `raw-parquet-exporter` stage,
+`cargo build --locked --release`)가 linux/amd64 바이너리를 만들어
+`/usr/local/bin/raw-parquet-exporter`에 넣는다. 래퍼 스크립트와 20개 표 설정은 `/app`에 있다.
+
+```bash
+# sj2 (APP_DIR=$HOME/apps/sdc). 이미지 tag는 compose.yaml이 정한다.
+cd ~/apps/sdc
+bin/kr-raw-parquet-export.sh --snapshot-date 2026-09-30 --dry-run   # 계획만
+bin/kr-raw-parquet-export.sh --snapshot-date 2026-09-30             # 전체 (약 35분)
+```
+
+- 내부 명령: `bin/raw-parquet-export-all.sh --route remote --direct-db --jobs 1 --no-build`
+  (`--entrypoint /app/bin/raw-parquet-export-all.sh`). `--direct-db`는 compose 네트워크의
+  `db`에 `DB_HOST`·`DB_PASSWORD` 등으로 붙는다. DSN은 명령줄·로그에 없다.
+- 출력: 컨테이너 `/stock_data/kr/raw/raw_postgres/snapshot_date=<D>/source=sj2_remote`,
+  호스트 `${STOCK_DATA_HOST_DIR:-/home/whi/data/stock_data}/kr/raw/raw_postgres/...`.
+  `route=remote`·`source=sj2_remote`·`_manifests/_SUCCESS.json` 형식은 맥에서 돌릴 때와 같다.
+- 고정값: `--jobs 1`, `--no-force`(기존 표는 건너뛰거나 이어받는다), manifest validation 켬.
+  같은 snapshot 날짜로 다시 돌리면 끝난 표는 건너뛴다.
+- 주의: `_SUCCESS.json`의 `manifest_path`는 컨테이너 경로(`/stock_data/...`)다. 호스트 경로로
+  읽는 쪽이 있으면 `SDC_KR_EXPORT_HOST_PATHS=1`을 주면 호스트 디렉터리를 같은 경로로
+  마운트하고 그 경로로 기록한다.
+- `db_read_connections`·`writer_workers`는 현재 exporter가 plan 출력에만 쓴다. 실제
+  연결 수는 `--jobs`(표 하나씩)가 정하고, `--jobs 1`이면 읽기 연결은 1개다.
+- Cronicle 제안(등록은 별도): `sdc_kr_raw_export`, Mon-Fri 23:35 KST, `catch_up=0`,
+  `max_children=1`, timeout 3시간. 선행 조건은 18:30 KR chain, 20:00\~20:30 수집,
+  23:00 `sdc_daily_freshness` 통과다. 23:35 시작이면 23:30 앵커(존재하는 chain 시각)와 안 겹친다. 그 전에 시작하면 marker의
+  `collector_overlap`이 참으로 찍힐 수 있다(정보용, modeler는 안 본다). 첫 실행은 `--dry-run`으로 본다.

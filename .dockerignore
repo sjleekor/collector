@@ -21,3 +21,4 @@ tests
 prompts
 stock_data_collector.iml
 
+tools/raw-parquet-exporter/target

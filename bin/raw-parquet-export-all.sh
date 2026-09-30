@@ -36,6 +36,13 @@ Options:
                                Required to resolve a table with >1 incomplete
                                checkpoint.
   --no-build                   Skip cargo release build.
+  --direct-db                  Only with --route remote. The DB is already reachable
+                               from this process (sj2 collector container on the compose
+                               network), so SDC_REMOTE_DSN is not used: the exporter reads
+                               DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD instead. Source
+                               name and _SUCCESS.json route stay remote/sj2_remote, so the
+                               modeler contract does not change. Refuses DB_HOST unset or
+                               localhost, so a Mac cannot label its local DB as sj2_remote.
   --no-validate                Skip manifest validation after each export.
   --validate-samples           Run source-vs-Parquet sample validation for raw_id tables.
   --dry-run                    Render export plans without writing Parquet files.
@@ -47,6 +54,7 @@ Environment overrides:
   SDC_RAW_PARQUET_JOBS                 Same as --jobs.
   SDC_RAW_PARQUET_FORCE=1             Same as --force.
   SDC_RAW_PARQUET_BUILD_RELEASE=0     Same as --no-build.
+  SDC_RAW_PARQUET_DIRECT_DB=1         Same as --direct-db.
   SDC_RAW_PARQUET_VALIDATE=0          Same as --no-validate.
   SDC_RAW_PARQUET_VALIDATE_SAMPLES=1  Same as --validate-samples.
   SDC_RAW_PARQUET_DRY_RUN=1           Same as --dry-run.
@@ -79,6 +87,7 @@ route="${SDC_RAW_PARQUET_ROUTE:-local}"
 jobs="${SDC_RAW_PARQUET_JOBS:-}"
 force="${SDC_RAW_PARQUET_FORCE:-0}"
 build_release="${SDC_RAW_PARQUET_BUILD_RELEASE:-1}"
+direct_db="${SDC_RAW_PARQUET_DIRECT_DB:-0}"
 validate="${SDC_RAW_PARQUET_VALIDATE:-1}"
 validate_samples="${SDC_RAW_PARQUET_VALIDATE_SAMPLES:-0}"
 dry_run="${SDC_RAW_PARQUET_DRY_RUN:-0}"
@@ -142,6 +151,10 @@ while (($#)); do
       build_release=0
       shift
       ;;
+    --direct-db)
+      direct_db=1
+      shift
+      ;;
     --no-validate)
       validate=0
       shift
@@ -190,6 +203,25 @@ case "$route" in
     ;;
 esac
 
+if [[ "$direct_db" == "1" ]]; then
+  if [[ "$route" != "remote" ]]; then
+    printf -- '--direct-db requires --route remote (got %s)\n' "$route" >&2
+    exit 2
+  fi
+  case "${DB_HOST:-}" in
+    ""|localhost|127.*|::1)
+      printf -- '--direct-db needs DB_HOST to be the sj2 DB host (got "%s"); refusing so a local DB is not labelled sj2_remote.\n' "${DB_HOST:-}" >&2
+      exit 2
+      ;;
+  esac
+  if [[ -z "${DB_PASSWORD:-}" ]]; then
+    printf -- '--direct-db needs DB_PASSWORD in the environment.\n' >&2
+    exit 2
+  fi
+  # An empty dsn_env makes the exporter skip the DSN env var and use DB_*.
+  dsn_env=""
+fi
+
 if ! [[ "$jobs" =~ ^[0-9]+$ ]] || ((jobs < 1)); then
   printf 'Invalid --jobs: %s (expected a positive integer)\n' "$jobs" >&2
   exit 2
@@ -214,7 +246,9 @@ if [[ ! -f "$config_path" ]]; then
   exit 2
 fi
 
-if ! command -v cargo >/dev/null 2>&1; then
+# cargo is only needed to build; --no-build + SDC_RAW_PARQUET_BIN (the prod image
+# ships /usr/local/bin/raw-parquet-exporter) must work without a toolchain.
+if [[ "$build_release" == "1" ]] && ! command -v cargo >/dev/null 2>&1; then
   printf 'cargo was not found in PATH. Install the Rust toolchain first.\n' >&2
   exit 2
 fi
@@ -566,7 +600,7 @@ trap 'on_signal 143' TERM
 trap 'on_signal 130' INT
 
 log "Raw Parquet full export starting in $app_dir"
-log "route=${route} snapshot_date=${snapshot_date} source=${source_name} output_root=${output_root} jobs=${jobs}"
+log "route=${route} direct_db=${direct_db} db_host=${DB_HOST:-} snapshot_date=${snapshot_date} source=${source_name} output_root=${output_root} jobs=${jobs}"
 log "runtime_path=${runtime_path}"
 
 started_at="$(TZ=Asia/Seoul date '+%Y-%m-%dT%H:%M:%S%z')"

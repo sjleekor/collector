@@ -60,8 +60,18 @@ sdc_run_collector() {
     # trapped, which is why the reap above exists as well.
     trap 'sdc_log "signal received; stopping ${SDC_RUN_CONTAINER_NAME}"; docker rm -f "${SDC_RUN_CONTAINER_NAME}" >/dev/null 2>&1 || true' INT TERM
   fi
-  sdc_log "run: $SDC_DOCKER_COMPOSE_CMD run --rm ${name_args[*]} $SDC_COLLECTOR_SERVICE $*"
-  sdc_compose run --rm "${name_args[@]}" "$SDC_COLLECTOR_SERVICE" "$@"
+  # Optional: run something other than the `collector` entrypoint (the KR raw
+  # export runs bin/raw-parquet-export-all.sh), and pass extra `run` options
+  # (e.g. `-e NAME=value`; never put a secret here, it is logged).
+  local -a entry_args=() extra_args=()
+  if [[ -n "${SDC_RUN_ENTRYPOINT:-}" ]]; then
+    entry_args=(--entrypoint "$SDC_RUN_ENTRYPOINT")
+  fi
+  if [[ -n "${SDC_RUN_EXTRA_ARGS:-}" ]]; then
+    read -r -a extra_args <<< "$SDC_RUN_EXTRA_ARGS"
+  fi
+  sdc_log "run: $SDC_DOCKER_COMPOSE_CMD run --rm ${name_args[*]} ${entry_args[*]} ${extra_args[*]} $SDC_COLLECTOR_SERVICE $*"
+  sdc_compose run --rm "${name_args[@]}" "${entry_args[@]}" "${extra_args[@]}" "$SDC_COLLECTOR_SERVICE" "$@"
 }
 
 sdc_run_collector_with_lock() {
