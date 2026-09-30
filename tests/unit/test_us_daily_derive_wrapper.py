@@ -6,7 +6,6 @@ import os
 import subprocess
 from pathlib import Path
 
-
 COLLECTOR_ROOT = Path(__file__).resolve().parents[2]
 WRAPPER = COLLECTOR_ROOT / "deploy/prod/bin/us-derive-daily.sh"
 
@@ -41,7 +40,9 @@ def test_daily_derive_uses_us_lock_and_keeps_monthly_universe_separate(tmp_path:
         "SDC_US_DERIVE_DAILY_BUDGET_SECONDS": "321",
         "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
     }
-    result = subprocess.run([str(WRAPPER), "--dry-run"], env=environment, text=True, capture_output=True)
+    result = subprocess.run(
+        [str(WRAPPER), "--dry-run"], env=environment, text=True, capture_output=True
+    )
     assert result.returncode == 0, result.stderr
     args = capture.read_text()
     assert "--name sdc-collector-us" in args
