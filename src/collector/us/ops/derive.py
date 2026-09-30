@@ -167,9 +167,12 @@ class TableRun:
     ok: bool = True
     error: str = ""
     tables: list[str] = field(default_factory=list)
+    #: prices-daily only: ``{"ok": bool, "error": str}``. Observational, so a
+    #: failure here never changes ``ok``.
+    arrival_journal: dict[str, object] | None = None
 
     def as_dict(self) -> dict[str, object]:
-        return {
+        out: dict[str, object] = {
             "name": self.name,
             "rebuilt": self.rebuilt,
             "reason": self.reason,
@@ -179,6 +182,9 @@ class TableRun:
             "error": self.error,
             "tables": self.tables,
         }
+        if self.arrival_journal is not None:
+            out["arrival_journal"] = self.arrival_journal
+        return out
 
 
 class _Budget:
@@ -303,6 +309,8 @@ def run_derive(
 
         run.reason = why
         if not should:
+            if name == "prices-daily" and not dry_run:
+                _journal_price_arrival(root, run)
             runs.append(run)
             continue
         if dry_run:
@@ -321,6 +329,9 @@ def run_derive(
                 run.rows = result.get("rows")
         except Exception as exc:  # noqa: BLE001
             run.ok, run.error = False, f"{type(exc).__name__}: {exc}"
+        else:
+            if name == "prices-daily":
+                _journal_price_arrival(root, run, result=result)
         run.seconds = time.monotonic() - started
         runs.append(run)
 
@@ -335,3 +346,42 @@ def run_derive(
         "ok": all(r.ok for r in runs),
         "tables": [r.as_dict() for r in runs],
     }
+
+
+def _journal_price_arrival(
+    root: DataRoot, run: TableRun, *, result: dict | None = None
+) -> None:
+    """Record the arrival journal. Never changes ``run.ok``.
+
+    The journal is forward-looking evidence, not a derive input. A failure is
+    reported in ``run.arrival_journal`` and on stderr, and the table stays ok.
+    """
+    import sys
+
+    try:
+        _record_price_arrival(root, result=result)
+    except Exception as exc:  # noqa: BLE001 — observation must not fail the derive
+        error = f"{type(exc).__name__}: {exc}"
+        run.arrival_journal = {"ok": False, "error": error}
+        print(f"warning: price arrival journal failed: {error}", file=sys.stderr)
+    else:
+        run.arrival_journal = {"ok": True, "error": ""}
+
+
+def _record_price_arrival(root: DataRoot, *, result: dict | None = None) -> None:
+    """Capture new price sessions after a complete snapshot; bootstrap on a skip.
+
+    On a skip the newest snapshot is used. ``source_rev`` is then left for the
+    journal to read, and only if the file changed since the last record.
+    """
+    from collector.us.ops.price_arrivals import record_price_snapshot
+    from collector.us.store.writer import latest_snapshot
+
+    path = Path(result["path"]) if result is not None else latest_snapshot(root, "prices_daily")
+    if path is None:
+        raise FileNotFoundError("prices_daily snapshot is missing for arrival journal")
+    record_price_snapshot(
+        snapshot_path=path,
+        journal_root=root.output / "us_price_arrivals_v1",
+        source_rev=str(result["source_rev"]) if result is not None else None,
+    )
