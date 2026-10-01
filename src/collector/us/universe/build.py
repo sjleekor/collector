@@ -723,6 +723,10 @@ def build_universe_incremental(
     staged_dir = Path(
         tempfile.mkdtemp(prefix=".universe-incremental-", dir=destination.parent.parent)
     )
+    # mkdtemp is 0700 and the rename keeps it; readers outside the container
+    # (briefing prepare, us-mirror) run as another user and need 0755 like
+    # every other snapshot partition.
+    staged_dir.chmod(0o755)
     import shutil
     try:
         staged_part = staged_dir / "part.parquet"

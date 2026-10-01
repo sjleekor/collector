@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import os
 import shutil
+import stat
 import sys
 from types import SimpleNamespace
 
@@ -114,6 +115,8 @@ def test_incremental_uses_previous_month_maintain_threshold(tmp_path, monkeypatc
         "SELECT date, cik, in_universe FROM read_parquet(?) ORDER BY date", [str(output)]
     ).fetchall()
     assert rows[-1] == (dt.date(2026, 10, 1), 2, True)
+    # The published partition must not keep mkdtemp's 0700 (2026-10-01 sj2).
+    assert stat.S_IMODE(output.parent.stat().st_mode) == 0o755
     assert result["completion_path"].is_file()
     import json
     marker = json.loads(result["completion_path"].read_text())
