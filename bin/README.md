@@ -213,6 +213,12 @@ data_lake/raw_postgres/snapshot_date=<D>/source=<S>/_manifests/_SUCCESS.json
 이 표식이 없거나 테이블 목록이 기대치와 다르면 레이크를 거부합니다(`--allow-incomplete-lake`로 우회 가능,
 기본 off).
 
+`--consistent-snapshot`(기본 꺼짐)을 주면 exporter의 `snapshot-hold`가 `REPEATABLE READ READ ONLY` 트랜잭션에서
+`pg_export_snapshot()`을 열어 두고, 모든 표가 그 snapshot을 읽습니다. 이때 표식의 `snapshot_policy`는
+`repeatable_read_exported_snapshot`이 되고 `pg_snapshot_id`가 같이 남습니다. 재실행할 때는 manifest의 snapshot id가
+같은 표만 건너뛰고, 나머지는 `--force`로 처음부터 다시 받습니다(snapshot id는 holder가 끝나면 다시 쓸 수 없습니다).
+holder는 표 작업이 끝나는 대로 닫고, wrapper가 죽어도 부모 프로세스가 사라진 것을 보고 스스로 끝납니다.
+
 하나라도 실패하면 이 표식은 **쓰이지 않습니다** — 부분 완료 레이크가 완료로 오인되지 않도록 하기
 위함입니다.
 

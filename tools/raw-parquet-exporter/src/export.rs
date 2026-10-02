@@ -576,12 +576,7 @@ pub async fn export_raw_id_partitioned_table(
     };
 
     let source_exclusive_end = source_max.saturating_add(1);
-    let source = ManifestSource {
-        name: runtime.source.name.clone(),
-        schema: runtime.source.schema.clone(),
-        snapshot_date: runtime.output.snapshot_date.clone(),
-        snapshot_policy: "per_chunk_read_committed".to_string(),
-    };
+    let source = manifest_source(runtime, "per_chunk_read_committed");
     let manifest_schema = build_manifest_schema(columns)?;
     let (
         run_id,
@@ -863,12 +858,7 @@ pub async fn export_date_month_partitioned_table(
         ))
     })?;
     let manifest_schema = build_manifest_schema(columns)?;
-    let source = ManifestSource {
-        name: runtime.source.name.clone(),
-        schema: runtime.source.schema.clone(),
-        snapshot_date: runtime.output.snapshot_date.clone(),
-        snapshot_policy: "per_month_read_committed".to_string(),
-    };
+    let source = manifest_source(runtime, "per_month_read_committed");
     let (
         run_id,
         first_start,
@@ -1160,12 +1150,7 @@ pub async fn export_full_table(
 
     let run_id = new_run_id(&table.name);
     let predicate = "full table".to_string();
-    let source = ManifestSource {
-        name: runtime.source.name.clone(),
-        schema: runtime.source.schema.clone(),
-        snapshot_date: runtime.output.snapshot_date.clone(),
-        snapshot_policy: "full_table_read_committed".to_string(),
-    };
+    let source = manifest_source(runtime, "full_table_read_committed");
     let manifest_schema = build_manifest_schema(columns)?;
     let partition_indices = full_table_partition_indices(table, columns)?;
 
@@ -1298,12 +1283,7 @@ pub async fn export_snapshot_items(
     let run_id = new_run_id(&table.name);
     let predicate =
         "stock_master_snapshot_items joined to stock_master_snapshot by snapshot_id".to_string();
-    let source = ManifestSource {
-        name: runtime.source.name.clone(),
-        schema: runtime.source.schema.clone(),
-        snapshot_date: runtime.output.snapshot_date.clone(),
-        snapshot_policy: "snapshot_items_read_committed".to_string(),
-    };
+    let source = manifest_source(runtime, "snapshot_items_read_committed");
     let manifest_schema = build_manifest_schema(columns)?;
 
     if options.dry_run {
@@ -1436,12 +1416,7 @@ pub fn export_empty_table(
         }
     }
 
-    let source = ManifestSource {
-        name: runtime.source.name.clone(),
-        schema: runtime.source.schema.clone(),
-        snapshot_date: runtime.output.snapshot_date.clone(),
-        snapshot_policy: "schema_only".to_string(),
-    };
+    let source = manifest_source(runtime, "schema_only");
     let manifest_schema = build_manifest_schema(columns)?;
     let manifest_file = manifest_file_path(runtime, &table.name);
     let manifest = ExportManifest {
@@ -1863,6 +1838,39 @@ fn partition_next_parts_from_checkpoint(
     Ok(partition_next_parts)
 }
 
+/// `snapshot_policy` recorded when every query reads one exported snapshot.
+pub const EXPORTED_SNAPSHOT_POLICY: &str = "repeatable_read_exported_snapshot";
+
+/// Manifest `source` block. With `--pg-snapshot` the policy becomes
+/// [`EXPORTED_SNAPSHOT_POLICY`] for every strategy (including `schema_only`,
+/// whose columns and bounds were also read from the snapshot) and the snapshot
+/// id is recorded; otherwise `default_policy` is kept unchanged.
+pub fn manifest_source(runtime: &RuntimeConfig, default_policy: &str) -> ManifestSource {
+    ManifestSource {
+        name: runtime.source.name.clone(),
+        schema: runtime.source.schema.clone(),
+        snapshot_date: runtime.output.snapshot_date.clone(),
+        snapshot_policy: if runtime.pg_snapshot_id.is_some() {
+            EXPORTED_SNAPSHOT_POLICY.to_string()
+        } else {
+            default_policy.to_string()
+        },
+        pg_snapshot_id: runtime.pg_snapshot_id.clone(),
+    }
+}
+
+/// A checkpoint can only continue on the snapshot it started on.
+fn check_resume_snapshot(checkpoint: &ExportCheckpoint, runtime: &RuntimeConfig) -> Result<()> {
+    if checkpoint.source.pg_snapshot_id != runtime.pg_snapshot_id {
+        return Err(ExporterError::InvalidConfig(format!(
+            "checkpoint pg snapshot {:?} does not match current {:?}; \
+             a snapshot id cannot be reacquired, restart the table",
+            checkpoint.source.pg_snapshot_id, runtime.pg_snapshot_id
+        )));
+    }
+    Ok(())
+}
+
 fn validate_resume_checkpoint(
     checkpoint: &ExportCheckpoint,
     runtime: &RuntimeConfig,
@@ -1903,6 +1911,7 @@ fn validate_resume_checkpoint(
             "checkpoint source does not match runtime source".to_string(),
         ));
     }
+    check_resume_snapshot(checkpoint, runtime)?;
     if checkpoint.chunk_rows != options.chunk_rows
         || checkpoint.batch_rows != options.batch_rows
         || checkpoint.max_rows_per_file != options.max_rows_per_file
@@ -1977,6 +1986,7 @@ fn validate_date_month_resume_checkpoint(
             "checkpoint source does not match runtime source".to_string(),
         ));
     }
+    check_resume_snapshot(checkpoint, runtime)?;
     if checkpoint.date_column.as_deref() != Some(date_column) {
         return Err(ExporterError::InvalidConfig(format!(
             "checkpoint date_column {:?} does not match table date_column `{date_column}`",
@@ -2584,6 +2594,51 @@ fn contains_parquet_files(path: &PathBuf) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn runtime_with_snapshot(id: Option<&str>) -> RuntimeConfig {
+        RuntimeConfig {
+            source: Default::default(),
+            output: Default::default(),
+            pg_snapshot_id: id.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn default_policy_and_manifest_json_are_unchanged_without_snapshot() {
+        let source = manifest_source(&runtime_with_snapshot(None), "per_chunk_read_committed");
+        assert_eq!(source.snapshot_policy, "per_chunk_read_committed");
+        assert!(source.pg_snapshot_id.is_none());
+        let json = serde_json::to_string(&source).unwrap();
+        assert!(!json.contains("pg_snapshot_id"), "{json}");
+    }
+
+    #[test]
+    fn exported_snapshot_overrides_every_strategy_policy_and_records_id() {
+        let runtime = runtime_with_snapshot(Some("00000003-0000002A-1"));
+        for default in [
+            "per_chunk_read_committed",
+            "per_month_read_committed",
+            "full_table_read_committed",
+            "snapshot_items_read_committed",
+            "schema_only",
+        ] {
+            let source = manifest_source(&runtime, default);
+            assert_eq!(source.snapshot_policy, "repeatable_read_exported_snapshot");
+            assert_eq!(
+                source.pg_snapshot_id.as_deref(),
+                Some("00000003-0000002A-1")
+            );
+        }
+    }
+
+    #[test]
+    fn old_manifest_source_without_snapshot_id_still_parses() {
+        let source: ManifestSource = serde_json::from_str(
+            r#"{"name":"a","schema":"public","snapshot_date":"2026-10-01","snapshot_policy":"per_chunk_read_committed"}"#,
+        )
+        .unwrap();
+        assert!(source.pg_snapshot_id.is_none());
+    }
 
     fn test_column(
         table_name: &str,

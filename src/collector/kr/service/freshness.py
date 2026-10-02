@@ -71,8 +71,8 @@ class FreshnessReport:
     generated_at: datetime | None = None
 
 
-def build_freshness_report(storage: Storage, *, running_limit: int = 20) -> FreshnessReport:
-    """Build a read-only summary of latest stored RAW data by collector domain."""
+def flow_latest_dates(storage: Storage) -> tuple[dict[str, date], dict[str, date | None]]:
+    """Latest stored date per flow metric, and per group (minimum over active metrics)."""
     metric_codes = sorted({metric for metrics in FLOW_METRIC_GROUPS.values() for metric in metrics})
     flow_metric_latest_dates = storage.get_krx_security_flow_metric_max_dates(
         metric_codes=metric_codes,
@@ -86,6 +86,12 @@ def build_freshness_report(storage: Storage, *, running_limit: int = 20) -> Fres
         dates = [flow_metric_latest_dates.get(metric) for metric in active_flow_metrics(group)]
         present_dates = [item for item in dates if item is not None]
         flow_group_latest_dates[group] = min(present_dates) if present_dates else None
+    return flow_metric_latest_dates, flow_group_latest_dates
+
+
+def build_freshness_report(storage: Storage, *, running_limit: int = 20) -> FreshnessReport:
+    """Build a read-only summary of latest stored RAW data by collector domain."""
+    flow_metric_latest_dates, flow_group_latest_dates = flow_latest_dates(storage)
 
     series_rows = storage.get_common_feature_series(active_only=True)
     observation_latest = storage.get_common_feature_observation_max_dates(

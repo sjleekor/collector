@@ -22,6 +22,11 @@ pub struct ManifestSource {
     pub schema: String,
     pub snapshot_date: String,
     pub snapshot_policy: String,
+    /// PostgreSQL exported-snapshot id every query of this table read from.
+    /// Absent (and not serialized) for the default per-statement policies, so
+    /// manifests written without `--pg-snapshot` are byte-identical to before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pg_snapshot_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

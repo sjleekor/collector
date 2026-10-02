@@ -19,6 +19,14 @@ Controlled by env vars:
   FAKE_EXPORTER_CALL_LOG=/path          Appended with "<subcommand> <table>"
                                         per invocation (order/replay
                                         assertions in tests).
+  FAKE_EXPORTER_SNAPSHOT_ID=<id>        ``snapshot-hold`` prints this id (default
+                                        00000003-0000002A-1) and keeps running until
+                                        killed, its parent goes away, or
+                                        FAKE_EXPORTER_HOLDER_EXIT_AFTER seconds pass.
+  FAKE_EXPORTER_HOLDER_STATE=/path      File that exists, holding the id, only while
+                                        the holder lives. ``export``/``resume`` with
+                                        ``--pg-snapshot`` fail unless it holds that id
+                                        (models "invalid snapshot identifier").
   FAKE_EXPORTER_RUNTIME_CAPTURE=/path   The first ``--runtime`` TOML this
                                         process sees is copied here verbatim,
                                         before bin/raw-parquet-export-all.sh's
@@ -86,7 +94,26 @@ def _checkpoint_path(runtime: dict, table: str, run_id: str) -> Path:
     return _table_output_root(runtime) / "_manifests" / "checkpoints" / f"{run_id}.json"
 
 
-def _write_manifest(runtime: dict, table: str, run_id: str, extract_predicate: str) -> None:
+def _snapshot_args_ok(args: list[str]) -> str | None:
+    """Return the --pg-snapshot id (or None); exit-code 1 text via SystemExit if dead."""
+    snapshot = _opt(args, "--pg-snapshot")
+    if snapshot is None:
+        return None
+    state = os.environ.get("FAKE_EXPORTER_HOLDER_STATE")
+    held = Path(state).read_text(encoding="utf-8").strip() if state and Path(state).exists() else ""
+    if held != snapshot:
+        print(f"fake-exporter: invalid snapshot identifier: {snapshot}", file=sys.stderr)
+        raise SystemExit(1)
+    return snapshot
+
+
+def _write_manifest(
+    runtime: dict,
+    table: str,
+    run_id: str,
+    extract_predicate: str,
+    pg_snapshot_id: str | None = None,
+) -> None:
     manifest_path = _manifest_path(runtime, table)
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(
@@ -98,7 +125,12 @@ def _write_manifest(runtime: dict, table: str, run_id: str, extract_predicate: s
                     "name": runtime["source"]["name"],
                     "schema": runtime["source"].get("schema", "public"),
                     "snapshot_date": runtime["output"]["snapshot_date"],
-                    "snapshot_policy": "per_chunk_read_committed",
+                    "snapshot_policy": (
+                        "repeatable_read_exported_snapshot"
+                        if pg_snapshot_id
+                        else "per_chunk_read_committed"
+                    ),
+                    **({"pg_snapshot_id": pg_snapshot_id} if pg_snapshot_id else {}),
                 },
                 "table": {
                     "name": table,
@@ -121,6 +153,7 @@ def cmd_export(args: list[str]) -> int:
     runtime = _load_runtime(runtime_path)
     tables = (_opt(args, "--tables", "") or "").split(",")
     dry_run = _flag(args, "--dry-run")
+    pg_snapshot_id = None if dry_run else _snapshot_args_ok(args)
 
     fail_tables = _split_env_list("FAKE_EXPORTER_FAIL_TABLES")
     leave_checkpoint_tables = _split_env_list("FAKE_EXPORTER_LEAVE_CHECKPOINT")
@@ -182,7 +215,7 @@ def cmd_export(args: list[str]) -> int:
             continue
 
         run_id = f"{table}-fake-{int(time.time())}-{os.getpid()}"
-        _write_manifest(runtime, table, run_id, extract_predicate="fake")
+        _write_manifest(runtime, table, run_id, "fake", pg_snapshot_id)
 
     return exit_code
 
@@ -191,6 +224,7 @@ def cmd_resume(args: list[str]) -> int:
     runtime_path = _opt(args, "--runtime")
     _capture_runtime(runtime_path)
     runtime = _load_runtime(runtime_path)
+    pg_snapshot_id = _snapshot_args_ok(args)
     checkpoint_path = Path(_opt(args, "--checkpoint"))
     checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
     table = checkpoint["table"]
@@ -205,7 +239,9 @@ def cmd_resume(args: list[str]) -> int:
     checkpoint["updated_at_unix_seconds"] = int(time.time())
     checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
 
-    _write_manifest(runtime, table, checkpoint["run_id"], checkpoint["extract_predicate"])
+    _write_manifest(
+        runtime, table, checkpoint["run_id"], checkpoint["extract_predicate"], pg_snapshot_id
+    )
     return 0
 
 
@@ -234,7 +270,33 @@ def cmd_validate_samples(args: list[str]) -> int:
     return 0
 
 
+def cmd_snapshot_hold(args: list[str]) -> int:
+    import signal
+
+    snapshot_id = os.environ.get("FAKE_EXPORTER_SNAPSHOT_ID", "00000003-0000002A-1")
+    state = os.environ.get("FAKE_EXPORTER_HOLDER_STATE")
+    exit_after = float(os.environ.get("FAKE_EXPORTER_HOLDER_EXIT_AFTER", "0") or 0)
+    _log_call("snapshot-hold", snapshot_id)
+
+    def release(*_: object) -> None:
+        if state and Path(state).exists():
+            Path(state).unlink()
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, release)
+    if state:
+        Path(state).write_text(snapshot_id, encoding="utf-8")
+    print(snapshot_id, flush=True)
+    parent = os.getppid()
+    started = time.time()
+    while True:
+        time.sleep(0.1)
+        if os.getppid() != parent or (exit_after and time.time() - started >= exit_after):
+            release()
+
+
 _SUBCOMMANDS = {
+    "snapshot-hold": cmd_snapshot_hold,
     "export": cmd_export,
     "validate": cmd_validate,
     "validate-samples": cmd_validate_samples,

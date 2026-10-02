@@ -135,6 +135,11 @@ pub struct RuntimeConfig {
     pub source: SourceConfig,
     #[serde(default)]
     pub output: OutputConfig,
+    /// Opt-in (`--pg-snapshot`): import this exported PostgreSQL snapshot so
+    /// every query of the process reads one database state. Never read from
+    /// the runtime TOML; a snapshot id is only valid while its holder lives.
+    #[serde(skip)]
+    pub pg_snapshot_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -66,6 +66,36 @@ def test_wrapper_runs_direct_route_with_fixed_safe_options(tmp_path: Path) -> No
     assert docker_capture.read_text().splitlines() == ["inspect sdc-collector-kr_raw_export"]
 
 
+def test_wrapper_consistent_snapshot_is_opt_in(tmp_path: Path) -> None:
+    off = tmp_path / "off"
+    off.mkdir()
+    result, capture, _ = _run_wrapper(off, ["--snapshot-date", "2026-09-30"])
+    assert result.returncode == 0, result.stderr
+    assert "--consistent-snapshot" not in capture.read_text()
+
+    on = tmp_path / "on"
+    on.mkdir()
+    result, capture, _ = _run_wrapper(
+        on, ["--snapshot-date", "2026-09-30", "--consistent-snapshot"]
+    )
+    assert result.returncode == 0, result.stderr
+    assert "--no-build --snapshot-date 2026-09-30 --consistent-snapshot" in capture.read_text()
+
+
+def test_wrapper_consistent_snapshot_env_and_invalid_value(tmp_path: Path) -> None:
+    env_on = tmp_path / "env_on"
+    env_on.mkdir()
+    result, capture, _ = _run_wrapper(env_on, [], {"SDC_KR_EXPORT_CONSISTENT_SNAPSHOT": "1"})
+    assert result.returncode == 0, result.stderr
+    assert "--consistent-snapshot" in capture.read_text()
+
+    bad_dir = tmp_path / "bad"
+    bad_dir.mkdir()
+    bad, capture2, _ = _run_wrapper(bad_dir, [], {"SDC_KR_EXPORT_CONSISTENT_SNAPSHOT": "yes"})
+    assert bad.returncode == 2
+    assert not capture2.exists()
+
+
 def test_wrapper_defaults_snapshot_date_and_omits_dry_run(tmp_path: Path) -> None:
     result, capture, _ = _run_wrapper(tmp_path, [])
     assert result.returncode == 0, result.stderr

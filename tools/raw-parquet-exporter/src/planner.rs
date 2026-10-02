@@ -441,6 +441,7 @@ mod tests {
         RuntimeConfig {
             source: SourceConfig::default(),
             output: Default::default(),
+            pg_snapshot_id: None,
         }
     }
 

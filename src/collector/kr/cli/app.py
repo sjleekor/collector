@@ -538,6 +538,69 @@ def _handle_ops_freshness_report(args: argparse.Namespace) -> None:
     sys.exit(1)
 
 
+def _handle_ops_kr_export_readiness(args: argparse.Namespace) -> None:
+    """Handle ``collector ops kr-export-readiness``.
+
+    Exit 0 ready, 75 not yet (keep waiting), 1 blocked (failed/partial run or input
+    past K). The evidence JSON goes to ``--output`` or stdout; the human summary to stderr.
+    """
+    import json
+    from datetime import datetime
+
+    from collector.kr.domain.enums import RunType
+    from collector.kr.infra.db_postgres.repositories import PostgresStorage
+    from collector.kr.service.export_readiness import (
+        DEFAULT_REQUIRED_RUN_TYPES,
+        ReadinessConfig,
+        evaluate_export_readiness,
+        exit_code_for,
+    )
+    from collector.kr.util.time import KST, now_kst
+
+    def _parse_ts(text: str) -> datetime:
+        value = datetime.fromisoformat(text)
+        return value.replace(tzinfo=KST) if value.tzinfo is None else value
+
+    try:
+        feature_date = date.fromisoformat(args.feature_asof_date)
+        as_of = _parse_ts(args.as_of) if args.as_of else now_kst()
+        required = (
+            tuple(
+                RunType(item.strip()) for item in args.required_run_types.split(",") if item.strip()
+            )
+            if args.required_run_types
+            else DEFAULT_REQUIRED_RUN_TYPES
+        )
+        overrides: list[tuple[RunType, datetime]] = []
+        for item in args.run_since or []:
+            name, _, ts = item.partition("=")
+            overrides.append((RunType(name.strip()), _parse_ts(ts.strip())))
+    except ValueError as exc:
+        print(f"❌ invalid argument: {exc}", file=sys.stderr)
+        sys.exit(2)
+
+    cfg = ReadinessConfig(
+        feature_asof_date=feature_date,
+        as_of=as_of,
+        min_ticker_ratio=args.min_ticker_ratio,
+        flow_max_lag_trading_days=args.flow_max_lag_trading_days,
+        required_run_types=required,
+        run_since_overrides=tuple(overrides),
+    )
+    storage = PostgresStorage(get_settings().db_dsn)
+    evidence = evaluate_export_readiness(storage, cfg)
+    text = json.dumps(evidence, ensure_ascii=False, indent=2, sort_keys=False) + "\n"
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as handle:
+            handle.write(text)
+    else:
+        sys.stdout.write(text)
+    print(f"kr-export-readiness K={feature_date} verdict={evidence['verdict']}", file=sys.stderr)
+    for reason in evidence["reasons"]:
+        print(f"   - {reason}", file=sys.stderr)
+    sys.exit(exit_code_for(evidence["verdict"]))
+
+
 def _dart_financial_actual_attempt_estimate(
     *,
     storage: object,
@@ -3007,6 +3070,58 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     ops_freshness.set_defaults(handler=_handle_ops_freshness_report)
+
+    ops_readiness = ops_sub.add_parser(
+        "kr-export-readiness",
+        help=(
+            "Read-only gate for the KR raw export: prices/flows reach K and the "
+            "required collection runs ended successfully. Exit 0 ready, 75 not yet, 1 blocked."
+        ),
+    )
+    ops_readiness.add_argument(
+        "--feature-asof-date", required=True, help="Feature date K (YYYY-MM-DD)."
+    )
+    ops_readiness.add_argument(
+        "--as-of",
+        default=None,
+        help=(
+            "Evaluation time, ISO 8601 (naive = KST). Default: now. "
+            "Its date D sets the DART default."
+        ),
+    )
+    ops_readiness.add_argument(
+        "--min-ticker-ratio",
+        type=float,
+        default=0.97,
+        help=(
+            "Minimum K daily_ohlcv ticker count as a share of the previous "
+            "session (default: 0.97)."
+        ),
+    )
+    ops_readiness.add_argument(
+        "--flow-max-lag-trading-days",
+        type=int,
+        default=0,
+        help="Allowed flow lag behind K in trading days (default: 0 = flows must reach K).",
+    )
+    ops_readiness.add_argument(
+        "--required-run-types",
+        default=None,
+        help="Comma-separated run_types replacing the KR-serving default set.",
+    )
+    ops_readiness.add_argument(
+        "--run-since",
+        action="append",
+        metavar="RUN_TYPE=ISO_TS",
+        help=(
+            "Expected-since override for one run type (repeatable). Defaults: DART chain types "
+            "D 04:00 KST, others K 18:30 KST."
+        ),
+    )
+    ops_readiness.add_argument(
+        "--output", default=None, help="Write the evidence JSON here instead of stdout."
+    )
+    ops_readiness.set_defaults(handler=_handle_ops_kr_export_readiness)
 
     # -- dart -----------------------------------------------------------------
     dart_parser = subparsers.add_parser("dart", help="OpenDART ingestion commands.")

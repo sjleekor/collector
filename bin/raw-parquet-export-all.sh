@@ -43,6 +43,17 @@ Options:
                                name and _SUCCESS.json route stay remote/sj2_remote, so the
                                modeler contract does not change. Refuses DB_HOST unset or
                                localhost, so a Mac cannot label its local DB as sj2_remote.
+  --consistent-snapshot        Opt-in. Open one PostgreSQL REPEATABLE READ READ ONLY
+                               snapshot (exporter `snapshot-hold`, kept open until all
+                               tables finish) and make every table read it, so the whole
+                               lake is one database state even if collectors commit
+                               meanwhile. _SUCCESS.json then records
+                               snapshot_policy=repeatable_read_exported_snapshot and
+                               pg_snapshot_id. A completed table is reused only when its
+                               manifest has the SAME snapshot id; any other state is
+                               re-exported from scratch (a snapshot id cannot be reacquired
+                               after its holder ends). Default is off: unchanged behavior
+                               (read_committed per chunk).
   --no-validate                Skip manifest validation after each export.
   --validate-samples           Run source-vs-Parquet sample validation for raw_id tables.
   --dry-run                    Render export plans without writing Parquet files.
@@ -55,6 +66,10 @@ Environment overrides:
   SDC_RAW_PARQUET_FORCE=1             Same as --force.
   SDC_RAW_PARQUET_BUILD_RELEASE=0     Same as --no-build.
   SDC_RAW_PARQUET_DIRECT_DB=1         Same as --direct-db.
+  SDC_RAW_PARQUET_CONSISTENT_SNAPSHOT=1  Same as --consistent-snapshot.
+  SDC_RAW_PARQUET_SNAPSHOT_WAIT_SECONDS  How long to wait for the holder's snapshot id
+                                       (default: 60).
+  SDC_RAW_PARQUET_SNAPSHOT_MAX_HOLD_SECONDS  Holder safety cap (default: 14400).
   SDC_RAW_PARQUET_VALIDATE=0          Same as --no-validate.
   SDC_RAW_PARQUET_VALIDATE_SAMPLES=1  Same as --validate-samples.
   SDC_RAW_PARQUET_DRY_RUN=1           Same as --dry-run.
@@ -88,6 +103,11 @@ jobs="${SDC_RAW_PARQUET_JOBS:-}"
 force="${SDC_RAW_PARQUET_FORCE:-0}"
 build_release="${SDC_RAW_PARQUET_BUILD_RELEASE:-1}"
 direct_db="${SDC_RAW_PARQUET_DIRECT_DB:-0}"
+consistent_snapshot="${SDC_RAW_PARQUET_CONSISTENT_SNAPSHOT:-0}"
+snapshot_wait_seconds="${SDC_RAW_PARQUET_SNAPSHOT_WAIT_SECONDS:-60}"
+snapshot_max_hold_seconds="${SDC_RAW_PARQUET_SNAPSHOT_MAX_HOLD_SECONDS:-14400}"
+pg_snapshot_id=""
+holder_pid=""
 validate="${SDC_RAW_PARQUET_VALIDATE:-1}"
 validate_samples="${SDC_RAW_PARQUET_VALIDATE_SAMPLES:-0}"
 dry_run="${SDC_RAW_PARQUET_DRY_RUN:-0}"
@@ -153,6 +173,10 @@ while (($#)); do
       ;;
     --direct-db)
       direct_db=1
+      shift
+      ;;
+    --consistent-snapshot)
+      consistent_snapshot=1
       shift
       ;;
     --no-validate)
@@ -231,6 +255,19 @@ if ((jobs > 4)); then
   jobs=4
 fi
 
+if [[ "$consistent_snapshot" != "0" && "$consistent_snapshot" != "1" ]]; then
+  printf 'Invalid SDC_RAW_PARQUET_CONSISTENT_SNAPSHOT: %s (expected 0 or 1)\n' "$consistent_snapshot" >&2
+  exit 2
+fi
+if ! [[ "$snapshot_wait_seconds" =~ ^[0-9]+$ ]] || ((snapshot_wait_seconds < 1)); then
+  printf 'Invalid SDC_RAW_PARQUET_SNAPSHOT_WAIT_SECONDS: %s\n' "$snapshot_wait_seconds" >&2
+  exit 2
+fi
+if ! [[ "$snapshot_max_hold_seconds" =~ ^[0-9]+$ ]] || ((snapshot_max_hold_seconds < 1)); then
+  printf 'Invalid SDC_RAW_PARQUET_SNAPSHOT_MAX_HOLD_SECONDS: %s\n' "$snapshot_max_hold_seconds" >&2
+  exit 2
+fi
+
 if ! [[ "$batch_rows" =~ ^[0-9]+$ ]] || ((batch_rows <= 0)); then
   printf 'Invalid SDC_RAW_PARQUET_BATCH_ROWS: %s\n' "$batch_rows" >&2
   exit 2
@@ -269,7 +306,20 @@ work_dir="$(mktemp -d "${TMPDIR:-/tmp}/sdc-raw-parquet-work.XXXXXX")"
 chmod 700 "$work_dir"
 mkdir -p "$work_dir/status"
 
+# The snapshot holder pins the vacuum horizon while its transaction is open, so it
+# is stopped as soon as the tables are done (stop_snapshot_holder) and again here
+# for every other exit path. If this script is SIGKILLed, the holder notices its
+# parent is gone and exits by itself.
+stop_snapshot_holder() {
+  if [[ -n "$holder_pid" ]]; then
+    kill "$holder_pid" 2>/dev/null || true
+    wait "$holder_pid" 2>/dev/null || true
+    holder_pid=""
+  fi
+}
+
 cleanup() {
+  stop_snapshot_holder
   rm -rf "$work_dir"
 }
 trap cleanup EXIT
@@ -398,6 +448,45 @@ if [[ "$dry_run" == "1" ]]; then
   common_export_args+=(--dry-run)
 fi
 
+is_pg_snapshot_id() {
+  [[ "$1" =~ ^[0-9A-F]{8}(-[0-9A-F]{8})?-[0-9]+$ ]]
+}
+
+# Start the holder and read its snapshot id. No snapshot -> no export: silently
+# falling back to read committed would defeat the point of asking for it.
+start_snapshot_holder() {
+  local out="$work_dir/snapshot-holder.out" err="$work_dir/snapshot-holder.err" waited=0 line=""
+  : > "$out"
+  "$bin_path" --log-level error snapshot-hold --runtime "$runtime_path" \
+    --max-hold-seconds "$snapshot_max_hold_seconds" >"$out" 2>"$err" &
+  holder_pid=$!
+  while ((waited < snapshot_wait_seconds * 10)); do
+    line="$(head -n 1 "$out" 2>/dev/null || true)"
+    [[ -n "$line" ]] && break
+    if ! kill -0 "$holder_pid" 2>/dev/null; then
+      break
+    fi
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  if [[ -z "$line" ]] || ! is_pg_snapshot_id "$line"; then
+    printf 'Could not obtain a PostgreSQL snapshot id from the holder (got "%s").\n' "$line" >&2
+    sed 's/^/  holder: /' "$err" >&2 || true
+    stop_snapshot_holder
+    exit 1
+  fi
+  pg_snapshot_id="$line"
+  log "Snapshot holder started pid=${holder_pid} pg_snapshot_id=${pg_snapshot_id}"
+}
+
+snapshot_holder_alive() {
+  [[ -n "$holder_pid" ]] && kill -0 "$holder_pid" 2>/dev/null
+}
+
+manifest_pg_snapshot_id() {
+  jq -r '.source.pg_snapshot_id // empty' "$(manifest_for_table "$1")" 2>/dev/null || true
+}
+
 manifest_for_table() {
   local table="$1"
   printf '%s/snapshot_date=%s/source=%s/_manifests/table_manifests/%s.json' \
@@ -467,7 +556,8 @@ resume_table() {
   local table="$1" checkpoint_file="$2"
   log "Resuming ${table} from $(basename "$checkpoint_file")"
   "$bin_path" --log-level error resume \
-    --config "$config_path" --runtime "$runtime_path" --checkpoint "$checkpoint_file" || return 1
+    --config "$config_path" --runtime "$runtime_path" --checkpoint "$checkpoint_file" \
+    ${pg_snapshot_id:+--pg-snapshot "$pg_snapshot_id"} || return 1
 
   if [[ "$validate" == "1" ]]; then
     local manifest
@@ -501,6 +591,24 @@ process_table() {
   fi
 
   if [[ "$force" == "1" ]]; then
+    if table_needs_all_chunks "$table"; then
+      export_table "$table" --force --all-chunks || return 1
+    else
+      export_table "$table" --force || return 1
+    fi
+    maybe_validate_samples "$table" || return 1
+    return 0
+  fi
+
+  if [[ -n "$pg_snapshot_id" ]]; then
+    # A snapshot id dies with its holder, so a checkpoint from an earlier attempt
+    # can never continue and a finished table is reusable only if it read this
+    # very snapshot. Everything else restarts from scratch.
+    if has_valid_completed_manifest "$table" \
+      && [[ "$(manifest_pg_snapshot_id "$table")" == "$pg_snapshot_id" ]]; then
+      log "Skipping ${table} (valid manifest on snapshot ${pg_snapshot_id})"
+      return 0
+    fi
     if table_needs_all_chunks "$table"; then
       export_table "$table" --force --all-chunks || return 1
     else
@@ -603,6 +711,15 @@ log "Raw Parquet full export starting in $app_dir"
 log "route=${route} direct_db=${direct_db} db_host=${DB_HOST:-} snapshot_date=${snapshot_date} source=${source_name} output_root=${output_root} jobs=${jobs}"
 log "runtime_path=${runtime_path}"
 
+if [[ "$consistent_snapshot" == "1" ]]; then
+  if [[ "$dry_run" == "1" ]]; then
+    log "consistent snapshot requested; dry-run reads nothing, so no holder is started"
+  else
+    start_snapshot_holder
+    common_export_args+=(--pg-snapshot "$pg_snapshot_id")
+  fi
+fi
+
 started_at="$(TZ=Asia/Seoul date '+%Y-%m-%dT%H:%M:%S%z')"
 
 for table in "${all_tables[@]}"; do
@@ -610,6 +727,13 @@ for table in "${all_tables[@]}"; do
     reap_finished
     ((${#running_pids[@]} >= jobs)) && sleep 0.2
   done
+  if [[ -n "$pg_snapshot_id" ]] && ! snapshot_holder_alive; then
+    # New importers would fail with "invalid snapshot identifier"; stop launching.
+    # Tables already running keep the snapshot they imported. The rest stay
+    # `missing` and the run fails, so no mixed-state _SUCCESS.json is written.
+    log "ERROR: snapshot holder is gone; not launching ${table} or later tables"
+    break
+  fi
   launch_table "$table"
 done
 
@@ -617,6 +741,9 @@ while ((${#running_pids[@]} > 0)); do
   reap_finished
   ((${#running_pids[@]} > 0)) && sleep 0.2
 done
+
+# Every table has imported its snapshot by now; release the vacuum horizon.
+stop_snapshot_holder
 
 failed_tables=()
 for table in "${all_tables[@]}"; do
@@ -637,13 +764,15 @@ write_success_marker() {
   success_path="${manifests_dir}/_SUCCESS.json"
   mkdir -p "$manifests_dir"
   python3 - "$success_path" "$route" "$jobs" "$started_at" "$finished_at" "$manifests_dir" \
-    "${all_tables[@]}" <<'PY'
+    "$pg_snapshot_id" "${all_tables[@]}" <<'PY'
 import json
 import os
 import sys
 from datetime import datetime, timedelta
 
-success_path, route, jobs, started_at, finished_at, manifests_dir, *tables = sys.argv[1:]
+success_path, route, jobs, started_at, finished_at, manifests_dir, pg_snapshot_id, *tables = (
+    sys.argv[1:]
+)
 
 table_entries = {}
 for table in tables:
@@ -651,6 +780,14 @@ for table in tables:
     with open(manifest_path, encoding="utf-8") as f:
         manifest = json.load(f)
     table_info = manifest["table"]
+    if pg_snapshot_id:
+        # Refuse to seal a lake whose tables did not all read the one snapshot.
+        source = manifest.get("source", {})
+        if (
+            source.get("pg_snapshot_id") != pg_snapshot_id
+            or source.get("snapshot_policy") != "repeatable_read_exported_snapshot"
+        ):
+            sys.exit(f"{table}: manifest is not on snapshot {pg_snapshot_id}: {source}")
     schema = table_info.get("schema") or {}
     table_entries[table] = {
         "manifest_path": manifest_path,
@@ -682,6 +819,9 @@ payload = {
     "collector_overlap": collector_overlap,
     "snapshot_policy": "read_committed_per_chunk",
 }
+if pg_snapshot_id:
+    payload["snapshot_policy"] = "repeatable_read_exported_snapshot"
+    payload["pg_snapshot_id"] = pg_snapshot_id
 
 tmp_path = success_path + ".tmp"
 with open(tmp_path, "w", encoding="utf-8") as f:

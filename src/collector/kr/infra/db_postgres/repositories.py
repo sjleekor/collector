@@ -4276,6 +4276,26 @@ class PostgresStorage:
             return None
         return row[0]
 
+    def get_daily_ohlcv_session_counts(self, since: date, until: date) -> dict[date, int]:
+        """Return distinct-ticker counts per ``daily_ohlcv`` trade date in ``[since, until]``.
+
+        Read-only; used by the export readiness gate to compare a session's
+        coverage with the previous one.
+        """
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT trade_date, COUNT(DISTINCT ticker)::int
+                    FROM daily_ohlcv
+                    WHERE trade_date BETWEEN %s AND %s
+                    GROUP BY trade_date
+                    """,
+                    (since, until),
+                )
+                rows = cur.fetchall()
+        return {row[0]: int(row[1]) for row in rows}
+
     def get_latest_market_cap_date(self) -> date | None:
         """Return the latest stored ``daily_market_cap`` trade_date."""
         with get_connection(self._dsn) as conn:

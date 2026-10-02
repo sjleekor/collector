@@ -2,7 +2,8 @@ use std::collections::HashMap;
 
 use clap::Parser;
 use raw_parquet_exporter::cli::{
-    Cli, Commands, ExportArgs, PlanArgs, PlanFormat, ResumeArgs, ValidateSamplesArgs,
+    Cli, Commands, ExportArgs, PlanArgs, PlanFormat, ResumeArgs, SnapshotHoldArgs,
+    ValidateSamplesArgs,
 };
 use raw_parquet_exporter::config::{load_export_config, load_runtime_config, ExtractStrategy};
 use raw_parquet_exporter::db::{Db, TableBounds};
@@ -41,6 +42,7 @@ async fn run() -> Result<()> {
         }
         Commands::ValidateSamples(args) => run_validate_samples(args).await,
         Commands::Resume(args) => run_resume(args).await,
+        Commands::SnapshotHold(args) => run_snapshot_hold(args).await,
     }
 }
 
@@ -59,9 +61,48 @@ async fn run_validate_samples(args: ValidateSamplesArgs) -> Result<()> {
     }
 }
 
+/// Open the snapshot, print its id (first stdout line, flushed), then keep the
+/// transaction open. Ends when the parent process goes away (so a killed
+/// wrapper cannot leak the holder), when `--max-hold-seconds` passes, or when
+/// the connection dies. SIGTERM/SIGKILL simply close the connection, which
+/// releases the snapshot.
+async fn run_snapshot_hold(args: SnapshotHoldArgs) -> Result<()> {
+    use std::io::Write;
+    use std::time::{Duration, Instant};
+
+    let runtime_config = load_runtime_config(&args.runtime)?;
+    let (client, snapshot_id) = Db::connect_snapshot_holder(&runtime_config).await?;
+    println!("{snapshot_id}");
+    std::io::stdout().flush().map_err(|source| {
+        ExporterError::InvalidData(format!("failed to flush snapshot id: {source}"))
+    })?;
+    tracing::info!(%snapshot_id, max_hold_seconds = args.max_hold_seconds, "snapshot held");
+
+    let parent = std::os::unix::process::parent_id();
+    let started = Instant::now();
+    let mut last_ping = Instant::now();
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        if std::os::unix::process::parent_id() != parent {
+            tracing::info!("parent process gone; releasing snapshot");
+            return Ok(());
+        }
+        if started.elapsed() >= Duration::from_secs(args.max_hold_seconds) {
+            tracing::warn!("max hold reached; releasing snapshot");
+            return Ok(());
+        }
+        if last_ping.elapsed() >= Duration::from_secs(15) {
+            // A dead connection means the snapshot is gone; say so loudly.
+            client.simple_query("SELECT 1").await?;
+            last_ping = Instant::now();
+        }
+    }
+}
+
 async fn run_export(args: ExportArgs) -> Result<()> {
     let export_config = load_export_config(&args.config)?;
     let mut runtime_config = load_runtime_config(&args.runtime)?;
+    runtime_config.pg_snapshot_id = args.pg_snapshot.clone();
     if let Some(snapshot_date) = args.snapshot_date.clone() {
         runtime_config.output.snapshot_date = snapshot_date;
     }
@@ -188,6 +229,7 @@ async fn run_resume(args: ResumeArgs) -> Result<()> {
     let checkpoint = read_checkpoint(&args.checkpoint)?;
     let export_config = load_export_config(&args.config)?;
     let mut runtime_config = load_runtime_config(&args.runtime)?;
+    runtime_config.pg_snapshot_id = args.pg_snapshot.clone();
     runtime_config.output.snapshot_date = checkpoint.source.snapshot_date.clone();
     if checkpoint.source.name != runtime_config.source.name
         || checkpoint.source.schema != runtime_config.source.schema

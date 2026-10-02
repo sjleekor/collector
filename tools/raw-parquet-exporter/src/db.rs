@@ -51,7 +51,39 @@ impl Db {
         });
 
         apply_session_settings(&client, runtime.source.read_only).await?;
+        if let Some(snapshot_id) = runtime.pg_snapshot_id.as_deref() {
+            import_snapshot(&client, snapshot_id).await?;
+        }
         Ok(Self { client })
+    }
+
+    /// Open the snapshot holder session: a long-lived `REPEATABLE READ READ ONLY`
+    /// transaction that exports its snapshot. Returns the client (keep it alive
+    /// for as long as the snapshot must stay importable) and the snapshot id.
+    ///
+    /// This session alone has `idle_in_transaction_session_timeout` disabled; it
+    /// sits idle in a transaction by design. Importing sessions keep the 30 min
+    /// guard.
+    pub async fn connect_snapshot_holder(runtime: &RuntimeConfig) -> Result<(Client, String)> {
+        let (client, connection) = connect_postgres(runtime).await?;
+        tokio::spawn(async move {
+            if let Err(error) = connection.await {
+                tracing::error!(%error, "postgres connection task failed");
+            }
+        });
+        apply_session_settings(&client, runtime.source.read_only).await?;
+        client
+            .batch_execute(
+                "
+                SET idle_in_transaction_session_timeout = 0;
+                BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
+                ",
+            )
+            .await?;
+        let row = client.query_one("SELECT pg_export_snapshot()", &[]).await?;
+        let snapshot_id: String = row.get(0);
+        validate_pg_snapshot_id(&snapshot_id).map_err(ExporterError::InvalidData)?;
+        Ok((client, snapshot_id))
     }
 
     pub fn client(&self) -> &Client {
@@ -211,6 +243,58 @@ async fn connect_postgres(
     config.connect(NoTls).await.map_err(ExporterError::from)
 }
 
+/// Accepts PostgreSQL's `%08X-%08X-%d` (older servers: `%08X-%d`) snapshot id.
+/// Strict on purpose: the value is interpolated into `SET TRANSACTION SNAPSHOT`.
+pub fn validate_pg_snapshot_id(id: &str) -> std::result::Result<String, String> {
+    let parts: Vec<&str> = id.split('-').collect();
+    let hex = |part: &str| {
+        part.len() == 8
+            && part
+                .chars()
+                .all(|c| c.is_ascii_digit() || ('A'..='F').contains(&c))
+    };
+    let counter = |part: &str| {
+        !part.is_empty() && part.len() <= 10 && part.chars().all(|c| c.is_ascii_digit())
+    };
+    let ok = match parts.as_slice() {
+        [a, b, n] => hex(a) && hex(b) && counter(n),
+        [a, n] => hex(a) && counter(n),
+        _ => false,
+    };
+    if ok {
+        Ok(id.to_string())
+    } else {
+        Err(format!(
+            "invalid pg snapshot id `{id}` (expected e.g. 00000003-0000002A-1)"
+        ))
+    }
+}
+
+/// `BEGIN ... REPEATABLE READ READ ONLY; SET TRANSACTION SNAPSHOT '<id>'` right after
+/// the session settings, so every later query (columns, bounds, chunks) reads
+/// that snapshot. Must be the first statement of the transaction.
+async fn import_snapshot(client: &Client, snapshot_id: &str) -> Result<()> {
+    validate_pg_snapshot_id(snapshot_id).map_err(ExporterError::InvalidConfig)?;
+    client
+        .batch_execute(&format!(
+            "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY; \
+             SET TRANSACTION SNAPSHOT '{snapshot_id}';"
+        ))
+        .await
+        .map_err(|error| {
+            // The bare tokio-postgres Display is just "db error"; the server
+            // message ("invalid snapshot identifier") is what the operator needs.
+            let detail = error
+                .as_db_error()
+                .map(|db| db.message().to_string())
+                .unwrap_or_else(|| error.to_string());
+            ExporterError::InvalidData(format!(
+                "could not import pg snapshot {snapshot_id}: {detail}"
+            ))
+        })?;
+    Ok(())
+}
+
 async fn apply_session_settings(client: &Client, read_only: bool) -> Result<()> {
     client
         .batch_execute(
@@ -242,6 +326,30 @@ mod tests {
             quote_ident("dart_xbrl_fact_raw").unwrap(),
             "\"dart_xbrl_fact_raw\""
         );
+    }
+
+    #[test]
+    fn accepts_postgres_snapshot_ids() {
+        assert!(validate_pg_snapshot_id("00000003-0000002A-1").is_ok());
+        assert!(validate_pg_snapshot_id("0000000A-1").is_ok());
+        assert!(validate_pg_snapshot_id("00000003-0000002A-12").is_ok());
+    }
+
+    #[test]
+    fn rejects_malformed_or_injected_snapshot_ids() {
+        for bad in [
+            "",
+            "00000003-0000002a-1",
+            "00000003-0000002A",
+            "00000003-0000002A-",
+            "00000003-0000002A-1'; DROP TABLE x; --",
+            "00000003-0000002A-1 ",
+            "0000003-0000002A-1",
+            "00000003-0000002A-1-1",
+            "00000003-0000002A-x",
+        ] {
+            assert!(validate_pg_snapshot_id(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

@@ -423,6 +423,7 @@ mod tests {
                 schema: "public".to_string(),
                 snapshot_date: "2026-06-19".to_string(),
                 snapshot_policy: "test".to_string(),
+                pg_snapshot_id: None,
             },
             table: crate::manifest::ManifestTable {
                 name: "t".to_string(),

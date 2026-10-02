@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::config::Priority;
+use crate::db::validate_pg_snapshot_id;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -30,6 +31,8 @@ pub enum Commands {
     ValidateSamples(ValidateSamplesArgs),
     /// Resume a failed export run. Phase 2+.
     Resume(ResumeArgs),
+    /// Hold an exported PostgreSQL snapshot open; print its id on the first line.
+    SnapshotHold(SnapshotHoldArgs),
 }
 
 #[derive(Debug, Clone, Parser)]
@@ -117,6 +120,10 @@ pub struct ExportArgs {
 
     #[arg(long)]
     pub force: bool,
+
+    /// Read every query from this exported PostgreSQL snapshot (see `snapshot-hold`).
+    #[arg(long, value_parser = validate_pg_snapshot_id)]
+    pub pg_snapshot: Option<String>,
 }
 
 #[derive(Debug, Clone, Parser)]
@@ -147,6 +154,21 @@ pub struct ResumeArgs {
 
     #[arg(long)]
     pub checkpoint: PathBuf,
+
+    /// Must equal the snapshot the checkpoint was written on.
+    #[arg(long, value_parser = validate_pg_snapshot_id)]
+    pub pg_snapshot: Option<String>,
+}
+
+#[derive(Debug, Clone, Parser)]
+pub struct SnapshotHoldArgs {
+    #[arg(long, default_value = "config/local.example.toml")]
+    pub runtime: PathBuf,
+
+    /// Safety cap: release the snapshot after this long even if nobody asked.
+    /// A leaked holder would otherwise pin the vacuum horizon indefinitely.
+    #[arg(long, default_value_t = 14_400)]
+    pub max_hold_seconds: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

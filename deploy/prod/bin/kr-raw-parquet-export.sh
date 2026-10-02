@@ -15,6 +15,13 @@
 # 옵션:
 #   --snapshot-date YYYY-MM-DD   기본은 오늘(KST). SDC_KR_EXPORT_SNAPSHOT_DATE로도 준다.
 #   --dry-run                    계획만 만든다(파일·marker 없음).
+#   --consistent-snapshot        한 PostgreSQL snapshot(REPEATABLE READ)을 모든 표가 읽는다.
+#                                SDC_KR_EXPORT_CONSISTENT_SNAPSHOT=1로도 켠다. 기본은 꺼짐
+#                                (read committed per chunk). 켜면 _SUCCESS.json에
+#                                snapshot_policy=repeatable_read_exported_snapshot과
+#                                pg_snapshot_id가 남고, 재시도는 같은 snapshot id일 때만
+#                                표를 건너뛴다. 읽는 쪽(modeler verify_raw)이 새 policy를
+#                                받는 버전이어야 한다.
 #
 # 호스트 경로 모드(기본, SDC_KR_EXPORT_HOST_PATHS=1): _SUCCESS.json의 manifest_path는
 # export가 본 경로로 적힌다. 운영 KR prepare(modeler kr_live_prepare)는 sj2 호스트에서
@@ -32,6 +39,7 @@ source "$script_dir/lib/sdc-wrapper.sh"
 
 snapshot_date="${SDC_KR_EXPORT_SNAPSHOT_DATE:-$(TZ=Asia/Seoul date +%F)}"
 dry_run=0
+consistent_snapshot="${SDC_KR_EXPORT_CONSISTENT_SNAPSHOT:-0}"
 
 while (($#)); do
   case "$1" in
@@ -47,8 +55,12 @@ while (($#)); do
       dry_run=1
       shift
       ;;
+    --consistent-snapshot)
+      consistent_snapshot=1
+      shift
+      ;;
     *)
-      sdc_log "unsupported option: $1 (allowed: --snapshot-date, --dry-run)"
+      sdc_log "unsupported option: $1 (allowed: --snapshot-date, --dry-run, --consistent-snapshot)"
       exit 2
       ;;
   esac
@@ -62,6 +74,13 @@ fi
 args=(--route remote --direct-db --jobs 1 --no-build --snapshot-date "$snapshot_date")
 if [[ "$dry_run" == "1" ]]; then
   args+=(--dry-run)
+fi
+
+if [[ "$consistent_snapshot" == "1" ]]; then
+  args+=(--consistent-snapshot)
+elif [[ "$consistent_snapshot" != "0" ]]; then
+  sdc_log "invalid SDC_KR_EXPORT_CONSISTENT_SNAPSHOT: $consistent_snapshot (expected 0 or 1)"
+  exit 2
 fi
 
 export SDC_RUN_ENTRYPOINT=/app/bin/raw-parquet-export-all.sh
