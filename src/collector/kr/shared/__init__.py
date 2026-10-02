@@ -22,8 +22,14 @@ from collector.kr.definitions.industry_groups import (
     resolve_groups,
 )
 from collector.kr.definitions.metric_rules import (
+    CURRENT_METRIC_RULES_VERSION,
+    METRIC_RULES_MRV1,
+    METRIC_RULES_MRV2,
+    METRIC_RULES_VERSIONS,
     default_metric_catalog,
     default_metric_mapping_rules,
+    metric_rules_content_hash,
+    resolve_metric_rules_version,
 )
 from collector.kr.domain.enums import Market, Source
 from collector.kr.domain.models import (
@@ -67,8 +73,14 @@ __all__ = [
     "UpsertResult",
     "default_common_feature_catalog",
     "default_common_feature_series",
+    "CURRENT_METRIC_RULES_VERSION",
+    "METRIC_RULES_MRV1",
+    "METRIC_RULES_MRV2",
+    "METRIC_RULES_VERSIONS",
     "default_metric_catalog",
     "default_metric_mapping_rules",
+    "metric_rules_content_hash",
+    "resolve_metric_rules_version",
     "get_trading_days",
     "now_kst",
     "resolve_groups",

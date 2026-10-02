@@ -1,75 +1,32 @@
-"""Metric catalog + mapping-rule definitions (pure data, no Storage).
+"""FROZEN metric catalog + mapping rules ``mrv1_20260818``. Do not edit.
 
-Moved out of ``service/normalize_metrics.py`` so both the Postgres normalization
-orchestrator and the DuckDB ``stock_metric_fact`` mart can import the same rule
-set without depending on the service layer. Behavior is unchanged from the
-original definitions; only the function names are now public.
+The rule set the KR model's training data (``stock_metric_fact`` of snapshot
+2026-08-23) was built under: 107 mapping rules, 29 metric codes.
 
-See ``docs/dev/20260728_refactor_pipeline/00_refactor_plan.md`` §3.0, §3.1.
+Source: legacy repository ``stock_data_collector.migrated``,
+``src/krx_collector/definitions/metric_rules.py`` at commit ``0546e12``
+(2026-08-18 19:56 +0900, "fix(metrics): give the XBRL fallback a consolidation
+basis so it can fill gaps"). Copied verbatim; only the import path and the two
+function names (``mrv1_*``) changed. Re-running ``stock_metric_fact`` over the
+08-23 raw with this set reproduces the frozen mart exactly (1,491,661 rows).
+
+Later changes (``mrv2_20260909`` = ``metric_rules.py``) only add rules: e959ff8
+(+16 XBRL-fallback rules for 4 metrics), 5337365 (+5 metric codes, 32 rules).
+
+A frozen serving model selects this set through
+``default_metric_mapping_rules(version="mrv1_20260818")``. Changing anything here
+breaks that reproduction; add a new version instead. ``tests/unit/test_metric_rules_versions.py``
+pins the content hash.
 """
 
 from __future__ import annotations
 
-import hashlib
-import json
 from datetime import date
 
-from collector.kr.definitions.metric_rules_mrv1_20260818 import (
-    mrv1_metric_catalog,
-    mrv1_metric_mapping_rules,
-)
 from collector.kr.domain.models import MetricCatalogEntry, MetricMappingRule
 
-#: Frozen rule set the KR model's training data was built under (107 rules / 29 codes).
-#: Source and details: ``metric_rules_mrv1_20260818.py``.
-METRIC_RULES_MRV1 = "mrv1_20260818"
-#: The rule set below in this file (155 rules / 34 codes). What every caller gets by default.
-METRIC_RULES_MRV2 = "mrv2_20260909"
-CURRENT_METRIC_RULES_VERSION = METRIC_RULES_MRV2
-METRIC_RULES_VERSIONS = (METRIC_RULES_MRV1, METRIC_RULES_MRV2)
 
-
-def resolve_metric_rules_version(version: str | None = None) -> str:
-    """``None`` -> the current version; anything else must be a known version id."""
-    resolved = CURRENT_METRIC_RULES_VERSION if version is None else version
-    if resolved not in METRIC_RULES_VERSIONS:
-        raise ValueError(
-            f"unknown metric rules version {version!r}; expected one of {METRIC_RULES_VERSIONS}"
-        )
-    return resolved
-
-
-def default_metric_catalog(version: str | None = None) -> list[MetricCatalogEntry]:
-    """Metric catalog of a rules version (``None`` = current)."""
-    if resolve_metric_rules_version(version) == METRIC_RULES_MRV1:
-        return mrv1_metric_catalog()
-    return _mrv2_metric_catalog()
-
-
-def default_metric_mapping_rules(version: str | None = None) -> list[MetricMappingRule]:
-    """Mapping rules of a rules version (``None`` = current)."""
-    if resolve_metric_rules_version(version) == METRIC_RULES_MRV1:
-        return mrv1_metric_mapping_rules()
-    return _mrv2_metric_mapping_rules()
-
-
-def metric_rules_content_hash(version: str | None = None) -> str:
-    """sha256 over every field of every rule and catalog entry of a version.
-
-    Order-sensitive on purpose: rule order does not change the winner today, but a reordered
-    list is still a different definition to pin.
-    """
-    from dataclasses import asdict
-
-    payload = {
-        "rules": [asdict(rule) for rule in default_metric_mapping_rules(version)],
-        "catalog": [asdict(entry) for entry in default_metric_catalog(version)],
-    }
-    text = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-def _mrv2_metric_catalog() -> list[MetricCatalogEntry]:
+def mrv1_metric_catalog() -> list[MetricCatalogEntry]:
     return [
         MetricCatalogEntry("revenue", "매출액", "financial", "KRW", "손익계산서 매출액"),
         MetricCatalogEntry("cogs", "매출원가", "financial", "KRW", "손익계산서 매출원가"),
@@ -89,27 +46,6 @@ def _mrv2_metric_catalog() -> list[MetricCatalogEntry]:
         MetricCatalogEntry("total_assets", "총자산", "financial", "KRW", "자산총계"),
         MetricCatalogEntry("total_liabilities", "총부채", "financial", "KRW", "부채총계"),
         MetricCatalogEntry("total_equity", "총자본", "financial", "KRW", "자본총계"),
-        # F-5.1. Five accounts measured on the 2026-09-08 lake before being
-        # mapped; coverage tables and the two rejections are in
-        # ../modeler/docs/dev/20260907_additional_feature/poc/metric_rules_ext.md 6-8.
-        MetricCatalogEntry(
-            "current_assets", "유동자산", "financial", "KRW", "재무상태표 유동자산"
-        ),
-        MetricCatalogEntry(
-            "current_liabilities", "유동부채", "financial", "KRW", "재무상태표 유동부채"
-        ),
-        MetricCatalogEntry(
-            "retained_earnings", "이익잉여금", "financial", "KRW", "재무상태표 이익잉여금"
-        ),
-        # Short and long term are separate metrics, not one `borrowings`: a
-        # mapping rule picks ONE winner per (metric, corp, period, basis), so a
-        # sum is not expressible here. feat_fin_risk adds them (PoC 7 decision 3).
-        MetricCatalogEntry(
-            "borrowings_short_term", "단기차입금", "financial", "KRW", "재무상태표 단기차입금"
-        ),
-        MetricCatalogEntry(
-            "borrowings_long_term", "장기차입금", "financial", "KRW", "재무상태표 장기차입금"
-        ),
         MetricCatalogEntry(
             "cash_and_cash_equivalents",
             "현금및현금성자산",
@@ -277,7 +213,7 @@ def _xbrl_fallback_rule(
     )
 
 
-def _mrv2_metric_mapping_rules() -> list[MetricMappingRule]:
+def mrv1_metric_mapping_rules() -> list[MetricMappingRule]:
     rules: list[MetricMappingRule] = []
     financial_specs = [
         ("revenue", "ifrs-full_Revenue", "IS"),
@@ -288,21 +224,6 @@ def _mrv2_metric_mapping_rules() -> list[MetricMappingRule]:
         ("total_assets", "ifrs-full_Assets", "BS"),
         ("total_liabilities", "ifrs-full_Liabilities", "BS"),
         ("total_equity", "ifrs-full_Equity", "BS"),
-        # F-5.1. Same shape as total_assets/total_liabilities: the statement rule
-        # names the `ifrs-full_` spelling and the `ifrs_` one arrives as an XBRL
-        # fallback below. `ifrs-full_ShorttermBorrowings` is labelled 차입금 by
-        # some filers and 단기차입금 by others -- the concept is the 단기차입금
-        # line either way, which is why the label is not what is matched on.
-        ("current_assets", "ifrs-full_CurrentAssets", "BS"),
-        ("current_liabilities", "ifrs-full_CurrentLiabilities", "BS"),
-        ("retained_earnings", "ifrs-full_RetainedEarnings", "BS"),
-        ("borrowings_short_term", "ifrs-full_ShorttermBorrowings", "BS"),
-        # dart_LongTermBorrowingsGross is the 장기차입금 balance-sheet line.
-        # `ifrs-full_LongtermBorrowings` only exists from 2023 (539 corps), so it
-        # is the fallback, not the primary. "Gross" is gross of the present-value
-        # discount, shown as a separate contra for 148 corps -- a small overstatement,
-        # bounded: short + long never exceeds total liabilities in 10,012 corp-years.
-        ("borrowings_long_term", "dart_LongTermBorrowingsGross", "BS"),
         ("cash_and_cash_equivalents", "ifrs-full_CashAndCashEquivalents", "BS"),
         ("operating_cash_flow", "ifrs-full_CashFlowsFromUsedInOperatingActivities", "CF"),
         ("investing_cash_flow", "ifrs-full_CashFlowsFromUsedInInvestingActivities", "CF"),
@@ -520,71 +441,6 @@ def _mrv2_metric_mapping_rules() -> list[MetricMappingRule]:
                 "ifrs-full_CashFlowsFromUsedInOperatingActivities",
                 "ifrs_CashFlowsFromUsedInOperatingActivities",
             ],
-        ),
-        # F-5.0. These four had statement rules only, so they existed only
-        # where dart_financial_statement_raw reaches -- about 100 rows before
-        # 2019 against ~100,000 after, which is what confined five of
-        # feat_fin_risk's nine families to 2020+ (F-4.6).
-        #
-        # The `ifrs_` spelling is the one that matters here, and it is easy to
-        # get wrong: DART switched taxonomy prefix around 2019, so measured on
-        # the 2026-08-23 lake `ifrs-full_Liabilities` has 364 facts up to 2018
-        # against `ifrs_Liabilities`'s 112,827. Mapping only `ifrs-full_` would
-        # add nothing to the early years -- exactly the gap being closed. Both
-        # spellings are listed for the same reason total_liabilities lists
-        # both. See ../modeler/docs/dev/20260907_additional_feature/poc/metric_rules_ext.md.
-        #
-        # ifrs-full_InterestPaid / ifrs_InterestPaid carry no facts at all, so
-        # only the ClassifiedAsOperatingActivities form is mapped.
-        (
-            "investing_cash_flow",
-            [
-                "ifrs-full_CashFlowsFromUsedInInvestingActivities",
-                "ifrs_CashFlowsFromUsedInInvestingActivities",
-            ],
-        ),
-        (
-            "financing_cash_flow",
-            [
-                "ifrs-full_CashFlowsFromUsedInFinancingActivities",
-                "ifrs_CashFlowsFromUsedInFinancingActivities",
-            ],
-        ),
-        (
-            "interest_paid",
-            [
-                "ifrs-full_InterestPaidClassifiedAsOperatingActivities",
-                "ifrs_InterestPaidClassifiedAsOperatingActivities",
-            ],
-        ),
-        (
-            "cash_and_cash_equivalents",
-            [
-                "ifrs-full_CashAndCashEquivalents",
-                "ifrs_CashAndCashEquivalents",
-            ],
-        ),
-        # F-5.1. The third spelling on short-term borrowings is not decoration:
-        # with only the two ifrs forms, 2015 cross-sectional coverage is 0.003,
-        # and dart_ShortTermBorrowings (2015-2017, 1,673 corps) takes the same
-        # year to 0.823. The `ifrs-full_`-only mistake F-5.0 caught, again.
-        ("current_assets", ["ifrs-full_CurrentAssets", "ifrs_CurrentAssets"]),
-        (
-            "current_liabilities",
-            ["ifrs-full_CurrentLiabilities", "ifrs_CurrentLiabilities"],
-        ),
-        ("retained_earnings", ["ifrs-full_RetainedEarnings", "ifrs_RetainedEarnings"]),
-        (
-            "borrowings_short_term",
-            [
-                "ifrs-full_ShorttermBorrowings",
-                "ifrs_ShorttermBorrowings",
-                "dart_ShortTermBorrowings",
-            ],
-        ),
-        (
-            "borrowings_long_term",
-            ["dart_LongTermBorrowingsGross", "ifrs-full_LongtermBorrowings"],
         ),
     ]
     for metric_code, concept_ids in xbrl_fallback_specs:
