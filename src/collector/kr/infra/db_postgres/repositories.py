@@ -37,6 +37,7 @@ from collector.kr.domain.models import (
     DartFilingReceiptLine,
     DartFinancialStatementLine,
     DartPeriodicExtraLine,
+    DartPeriodicReceipt,
     DartShareCountLine,
     DartShareholderReturnLine,
     DartXbrlDocument,
@@ -954,6 +955,34 @@ class PostgresStorage:
             with conn.cursor() as cur:
                 cur.execute(sql, tuple(params))
                 return {(row[0], row[1]) for row in cur.fetchall()}
+
+    def get_dart_periodic_receipts(
+        self,
+        rcept_from: date,
+        rcept_to: date,
+    ) -> list[DartPeriodicReceipt]:
+        """Return original periodic-report receipts in ``[rcept_from, rcept_to]``."""
+        sql = """
+            SELECT r.corp_code, r.report_nm, r.rcept_no, r.rcept_dt,
+                   COALESCE(m.acc_mt, '')
+            FROM dart_filing_receipt_raw r
+            LEFT JOIN dart_corp_master m ON m.corp_code = r.corp_code
+            WHERE r.rcept_dt BETWEEN %s AND %s
+              AND r.report_nm ~ '^(사업|반기|분기)보고서'
+        """
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (rcept_from, rcept_to))
+                return [
+                    DartPeriodicReceipt(
+                        corp_code=row[0],
+                        report_nm=row[1],
+                        rcept_no=row[2],
+                        rcept_dt=row[3],
+                        acc_mt=str(row[4] or ""),
+                    )
+                    for row in cur.fetchall()
+                ]
 
     def get_existing_dart_xbrl_document_keys(
         self,

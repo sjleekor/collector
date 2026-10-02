@@ -58,6 +58,9 @@ class SlicePlan:
     skipped_complete: list[str] = field(default_factory=list)
     skipped_no_data: list[str] = field(default_factory=list)
     retrying: list[str] = field(default_factory=list)
+    #: No-data slices re-asked because a filing receipt says upstream should now
+    #: have the data. They are also in ``pending``.
+    receipt_retry: list[str] = field(default_factory=list)
 
     @property
     def skipped(self) -> int:
@@ -66,12 +69,15 @@ class SlicePlan:
 
     def as_counts(self) -> dict[str, int]:
         """Counters for ``ingestion_runs.counts``."""
-        return {
+        counts = {
             "slices_pending": len(self.pending),
             "slices_skipped_complete": len(self.skipped_complete),
             "slices_skipped_no_data": len(self.skipped_no_data),
             "slices_retrying": len(self.retrying),
         }
+        if self.receipt_retry:
+            counts["slices_receipt_retry"] = len(self.receipt_retry)
+        return counts
 
 
 class SliceLedger:
@@ -105,7 +111,13 @@ class SliceLedger:
         )
         self._pending_writes: list[CollectionSliceState] = []
 
-    def plan(self, slice_keys: Sequence[str], *, force: bool = False) -> SlicePlan:
+    def plan(
+        self,
+        slice_keys: Sequence[str],
+        *,
+        force: bool = False,
+        retry_keys: Sequence[str] = (),
+    ) -> SlicePlan:
         """Split *slice_keys* into what to collect and what to skip.
 
         Args:
@@ -114,6 +126,9 @@ class SliceLedger:
             force: Collect everything, ignoring the ledger. The ledger is still
                 written, so a forced run repairs stale rows rather than
                 bypassing them permanently.
+            retry_keys: Slices that an external signal (a filing receipt) says
+                upstream can answer now. Only an unexpired ``no_data`` verdict is
+                overridden; ``success`` stays done. Order is the priority.
 
         Returns:
             A :class:`SlicePlan`.
@@ -170,6 +185,15 @@ class SliceLedger:
             # nothing ever revisits.
             plan.retrying.append(key)
             plan.pending.append(key)
+
+        if retry_keys and plan.skipped_no_data:
+            skipped = set(plan.skipped_no_data)
+            chosen = [key for key in dict.fromkeys(retry_keys) if key in skipped]
+            if chosen:
+                chosen_set = set(chosen)
+                plan.skipped_no_data = [k for k in plan.skipped_no_data if k not in chosen_set]
+                plan.pending.extend(chosen)
+                plan.receipt_retry = chosen
 
         return plan
 

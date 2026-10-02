@@ -36,6 +36,7 @@ from collector.kr.domain.enums import UniverseScope
 from collector.kr.infra.config.settings import get_settings
 from collector.kr.infra.logging.setup import setup_logging
 from collector.kr.service.backfill_stock_master import DEFAULT_SNAPSHOT_SOURCES
+from collector.kr.service.dart_receipt_retry import DEFAULT_RETRY_MAX_SLOTS
 from collector.kr.service.freshness import (
     DEFAULT_MAX_LAG_CALENDAR_DAYS,
     DEFAULT_MAX_LAG_TRADING_DAYS,
@@ -601,6 +602,36 @@ def _handle_ops_kr_export_readiness(args: argparse.Namespace) -> None:
     sys.exit(exit_code_for(evidence["verdict"]))
 
 
+def _build_cli_receipt_retry_plan(storage: object, args: argparse.Namespace, targets: list[object]):
+    """Build the receipt-driven retry plan for an incremental DART run, or ``None``.
+
+    Any failure reading receipts falls back to the normal TTL behaviour: the
+    retry is an optimisation, never a reason for the chain to stop.
+    """
+    window_days = int(getattr(args, "receipt_retry_window_days", 0) or 0)
+    if window_days <= 0 or args.force:
+        return None
+    from collector.kr.service.dart_receipt_retry import build_receipt_retry_plan
+    from collector.kr.util.time import today_kst
+
+    try:
+        retry = build_receipt_retry_plan(
+            storage,
+            as_of=today_kst(),
+            window_days=window_days,
+            max_slots=args.receipt_retry_max_slots,
+            corp_codes={corp.corp_code for corp in targets},
+        )
+    except Exception as exc:  # noqa: BLE001 - never stop the chain for an optimisation
+        print(f"⚠ receipt retry disabled for this run: {exc}", file=sys.stderr)
+        return None
+    print(
+        f"   - Receipt retry: window={retry.window_days}d receipts={retry.receipts_considered} "
+        f"slots={len(retry.slots)} capped={retry.slots_capped}"
+    )
+    return retry or None
+
+
 def _dart_financial_actual_attempt_estimate(
     *,
     storage: object,
@@ -883,6 +914,7 @@ def _handle_dart_sync_financials(args: argparse.Namespace) -> None:
     allowed_year_report_pairs = None
     skip_request_keys = None
     run_params_extra = None
+    receipt_retry = None
     if args.incremental:
         from collector.kr.domain.enums import RunStatus, RunType
         from collector.kr.service.dart_target_plan import build_dart_target_plan
@@ -899,7 +931,8 @@ def _handle_dart_sync_financials(args: argparse.Namespace) -> None:
             reprt_codes=reprt_codes,
             negative_cache_ttl_days=args.negative_cache_ttl_days,
         )
-        if not plan.allowed_year_report_pairs:
+        receipt_retry = _build_cli_receipt_retry_plan(storage, args, active_targets)
+        if not plan.allowed_year_report_pairs and not receipt_retry:
             record_terminal_run(
                 storage,
                 run_type=RunType.DART_FINANCIAL_SYNC,
@@ -917,7 +950,7 @@ def _handle_dart_sync_financials(args: argparse.Namespace) -> None:
             force=args.force,
             skip_request_keys=plan.negative_cache_request_keys,
         )
-        if actual_attempt_estimate == 0:
+        if actual_attempt_estimate == 0 and not receipt_retry:
             audit_params = {
                 **plan.audit_params(),
                 "prefilter_estimated_request_count": plan.estimated_request_count,
@@ -980,6 +1013,7 @@ def _handle_dart_sync_financials(args: argparse.Namespace) -> None:
         skip_request_keys=skip_request_keys,
         run_params_extra=run_params_extra,
         scope=UniverseScope(args.universe_scope),
+        receipt_retry=receipt_retry,
     )
 
     if result.errors:
@@ -1027,6 +1061,7 @@ def _handle_dart_sync_share_info(args: argparse.Namespace) -> None:
     allowed_year_report_pairs = None
     skip_request_keys = None
     run_params_extra = None
+    receipt_retry = None
     if args.incremental:
         from collector.kr.domain.enums import RunStatus, RunType
         from collector.kr.service.dart_target_plan import build_dart_target_plan
@@ -1043,7 +1078,8 @@ def _handle_dart_sync_share_info(args: argparse.Namespace) -> None:
             reprt_codes=reprt_codes,
             negative_cache_ttl_days=args.negative_cache_ttl_days,
         )
-        if not plan.allowed_year_report_pairs:
+        receipt_retry = _build_cli_receipt_retry_plan(storage, args, active_targets)
+        if not plan.allowed_year_report_pairs and not receipt_retry:
             record_terminal_run(
                 storage,
                 run_type=RunType.DART_SHARE_INFO_SYNC,
@@ -1060,7 +1096,7 @@ def _handle_dart_sync_share_info(args: argparse.Namespace) -> None:
             force=args.force,
             skip_request_keys=plan.negative_cache_request_keys,
         )
-        if actual_attempt_estimate == 0:
+        if actual_attempt_estimate == 0 and not receipt_retry:
             audit_params = {
                 **plan.audit_params(),
                 "prefilter_estimated_request_count": plan.estimated_request_count,
@@ -1124,6 +1160,7 @@ def _handle_dart_sync_share_info(args: argparse.Namespace) -> None:
         skip_request_keys=skip_request_keys,
         run_params_extra=run_params_extra,
         scope=UniverseScope(args.universe_scope),
+        receipt_retry=receipt_retry,
     )
 
     if result.errors:
@@ -1263,12 +1300,14 @@ def _handle_dart_sync_xbrl(args: argparse.Namespace) -> None:
     allowed_year_report_pairs = None
     skip_request_keys = None
     run_params_extra = None
+    receipt_retry = None
     if args.incremental:
         from collector.kr.domain.enums import RunStatus, RunType
         from collector.kr.service.dart_target_plan import build_dart_target_plan
         from collector.kr.util.pipeline import record_terminal_run
 
-        active_count = len(storage.get_dart_corp_master(active_only=True, tickers=tickers))
+        active_targets = storage.get_dart_corp_master(active_only=True, tickers=tickers)
+        active_count = len(active_targets)
         plan = build_dart_target_plan(
             storage,
             run_type=RunType.XBRL_PARSE,
@@ -1278,7 +1317,8 @@ def _handle_dart_sync_xbrl(args: argparse.Namespace) -> None:
             reprt_codes=reprt_codes,
             negative_cache_ttl_days=args.negative_cache_ttl_days,
         )
-        if not plan.allowed_year_report_pairs:
+        receipt_retry = _build_cli_receipt_retry_plan(storage, args, active_targets)
+        if not plan.allowed_year_report_pairs and not receipt_retry:
             record_terminal_run(
                 storage,
                 run_type=RunType.XBRL_PARSE,
@@ -1295,7 +1335,7 @@ def _handle_dart_sync_xbrl(args: argparse.Namespace) -> None:
             force=args.force,
             skip_request_keys=plan.negative_cache_request_keys,
         )
-        if actual_attempt_estimate == 0:
+        if actual_attempt_estimate == 0 and not receipt_retry:
             audit_params = {
                 **plan.audit_params(),
                 "prefilter_estimated_request_count": plan.estimated_request_count,
@@ -1357,6 +1397,7 @@ def _handle_dart_sync_xbrl(args: argparse.Namespace) -> None:
         skip_request_keys=skip_request_keys,
         run_params_extra=run_params_extra,
         scope=UniverseScope(args.universe_scope),
+        receipt_retry=receipt_retry,
     )
 
     if result.errors:
@@ -3243,6 +3284,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Days to skip request keys that recently returned no-data.",
     )
     dart_sync_financials.add_argument(
+        "--receipt-retry-window-days",
+        type=int,
+        default=0,
+        help=(
+            "In --incremental mode, re-ask no-data slots for this many days after a "
+            "periodic-report filing receipt confirms them, and lift the report "
+            "availability gate for them. 0 disables (default)."
+        ),
+    )
+    dart_sync_financials.add_argument(
+        "--receipt-retry-max-slots",
+        type=int,
+        default=DEFAULT_RETRY_MAX_SLOTS,
+        help="Cap on receipt-confirmed slots added to one run (newest receipts kept).",
+    )
+    dart_sync_financials.add_argument(
         "--universe-scope",
         choices=["current", "historical"],
         default="current",
@@ -3307,6 +3364,22 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=3,
         help="Days to skip request keys that recently returned no-data.",
+    )
+    dart_sync_share_info.add_argument(
+        "--receipt-retry-window-days",
+        type=int,
+        default=0,
+        help=(
+            "In --incremental mode, re-ask no-data slots for this many days after a "
+            "periodic-report filing receipt confirms them, and lift the report "
+            "availability gate for them. 0 disables (default)."
+        ),
+    )
+    dart_sync_share_info.add_argument(
+        "--receipt-retry-max-slots",
+        type=int,
+        default=DEFAULT_RETRY_MAX_SLOTS,
+        help="Cap on receipt-confirmed slots added to one run (newest receipts kept).",
     )
     dart_sync_share_info.add_argument(
         "--universe-scope",
@@ -3435,6 +3508,22 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=3,
         help="Days to skip request keys that recently returned no-data.",
+    )
+    dart_sync_xbrl.add_argument(
+        "--receipt-retry-window-days",
+        type=int,
+        default=0,
+        help=(
+            "In --incremental mode, re-ask no-data slots for this many days after a "
+            "periodic-report filing receipt confirms them, and lift the report "
+            "availability gate for them. 0 disables (default)."
+        ),
+    )
+    dart_sync_xbrl.add_argument(
+        "--receipt-retry-max-slots",
+        type=int,
+        default=DEFAULT_RETRY_MAX_SLOTS,
+        help="Cap on receipt-confirmed slots added to one run (newest receipts kept).",
     )
     dart_sync_xbrl.add_argument(
         "--universe-scope",

@@ -329,6 +329,22 @@ class DartFilingReceiptLine:
 
 
 @dataclass(frozen=True, slots=True)
+class DartPeriodicReceipt:
+    """One periodic-report-looking disclosure receipt joined with its fiscal-year end.
+
+    Read-side projection of ``dart_filing_receipt_raw`` used to decide which
+    (corp, year, report) slots OpenDART should now be able to answer. ``acc_mt``
+    is the corp's fiscal-year-end month from ``dart_corp_master`` ("" if unknown).
+    """
+
+    corp_code: str
+    report_nm: str
+    rcept_no: str
+    rcept_dt: date
+    acc_mt: str
+
+
+@dataclass(frozen=True, slots=True)
 class DartCapitalChangeLine:
     """Single raw row from OpenDART irdsSttus (증자(감자)현황)."""
 

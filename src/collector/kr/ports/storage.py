@@ -27,6 +27,7 @@ from collector.kr.domain.models import (
     DartFilingReceiptLine,
     DartFinancialStatementLine,
     DartPeriodicExtraLine,
+    DartPeriodicReceipt,
     DartShareCountLine,
     DartShareholderReturnLine,
     DartXbrlDocument,
@@ -291,6 +292,18 @@ class Storage(Protocol):
 
         ``year`` is the calendar year of ``rcept_dt``, used as a coarse
         completion proxy for one fetch window (see ``sync_dart_filings``).
+        """
+        ...
+
+    def get_dart_periodic_receipts(
+        self,
+        rcept_from: date,
+        rcept_to: date,
+    ) -> list[DartPeriodicReceipt]:
+        """Return receipts whose title starts like a periodic report, in a date range.
+
+        Only titles beginning with 사업/반기/분기보고서 (no ``[기재정정]`` style prefix)
+        are returned; the caller still validates the exact title shape.
         """
         ...
 

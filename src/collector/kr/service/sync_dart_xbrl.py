@@ -10,6 +10,11 @@ from collector.kr.domain.models import DartXbrlSyncResult, IngestionRun, XbrlBac
 from collector.kr.ports.storage import Storage
 from collector.kr.ports.xbrl import XbrlProvider
 from collector.kr.service.collection_targets import resolve_dart_targets
+from collector.kr.service.dart_receipt_retry import (
+    ReceiptRetryPlan,
+    retry_counts,
+    slot_allowed,
+)
 from collector.kr.util.pipeline import (
     OpenDartKeyExhaustedError,
     build_run_counts,
@@ -53,8 +58,14 @@ def sync_dart_xbrl(
     skip_request_keys: set[str] | None = None,
     run_params_extra: dict[str, object] | None = None,
     scope: UniverseScope = UniverseScope.CURRENT,
+    receipt_retry: ReceiptRetryPlan | None = None,
 ) -> DartXbrlSyncResult:
-    """Synchronise parsed XBRL ZIP data for filings already present in financial raw."""
+    """Synchronise parsed XBRL ZIP data for filings already present in financial raw.
+
+    ``receipt_retry`` lists slots a filing receipt confirms: an unexpired no-data
+    verdict or negative-cache entry for them is overridden, and the report-type
+    availability gate does not apply to them. Ignored when ``force`` is set.
+    """
     no_data_ttl_days = (
         None if scope is UniverseScope.HISTORICAL else DEFAULT_NO_DATA_TTL_DAYS
     )
@@ -71,6 +82,7 @@ def sync_dart_xbrl(
             "universe_scope": scope.value,
             "slice_ledger_endpoint": LEDGER_ENDPOINT,
             "no_data_ttl_days": no_data_ttl_days,
+            **(receipt_retry.audit_params() if receipt_retry is not None else {}),
             "allowed_year_report_pairs": (
                 [f"{year}:{code}" for year, code in sorted(allowed_year_report_pairs)]
                 if allowed_year_report_pairs is not None
@@ -95,6 +107,10 @@ def sync_dart_xbrl(
     )
     ledger_pending: set[str] = set()
     slices_skipped_no_data = 0
+    retry_slots = receipt_retry.slots if (receipt_retry and not force) else {}
+    retry_ledger_keys: set[str] = set()
+    retry_applied: set[str] = set()
+    retry_requests = 0
 
     try:
         corp_rows = resolve_dart_targets(storage, scope, tickers)
@@ -109,9 +125,13 @@ def sync_dart_xbrl(
         for row in financial_rows:
             if not row.ticker or not row.rcept_no:
                 continue
-            if (
-                allowed_year_report_pairs is not None
-                and (row.bsns_year, row.reprt_code) not in allowed_year_report_pairs
+            row_corp = corp_by_ticker.get(row.ticker)
+            if not slot_allowed(
+                allowed_year_report_pairs,
+                retry_slots,
+                row_corp.corp_code if row_corp is not None else "",
+                row.bsns_year,
+                row.reprt_code,
             ):
                 continue
             key = (row.ticker, row.bsns_year, row.reprt_code, row.rcept_no)
@@ -137,8 +157,20 @@ def sync_dart_xbrl(
             for ticker, bsns_year, reprt_code, rcept_no in request_targets.values()
             if (corp := corp_by_ticker.get(ticker)) is not None
         ]
-        ledger_plan = ledger.plan(ledger_keys, force=force)
+        retry_keys: list[str] = []
+        if receipt_retry and not force:
+            retry_keys = receipt_retry.rank_keys(
+                (
+                    _slice_key(corp.corp_code, bsns_year, reprt_code, rcept_no),
+                    (corp.corp_code, bsns_year, reprt_code),
+                )
+                for ticker, bsns_year, reprt_code, rcept_no in request_targets.values()
+                if (corp := corp_by_ticker.get(ticker)) is not None
+            )
+            retry_ledger_keys = set(retry_keys)
+        ledger_plan = ledger.plan(ledger_keys, force=force, retry_keys=retry_keys)
         ledger_pending = set(ledger_plan.pending)
+        retry_applied = set(ledger_plan.receipt_retry)
         slices_skipped_no_data = len(ledger_plan.skipped_no_data)
 
         result.targets_processed = len(request_targets)
@@ -157,12 +189,14 @@ def sync_dart_xbrl(
                 logger.debug("Skipping existing XBRL document %s", request_key)
                 result.requests_skipped += 1
                 continue
-            if request_key in skip_request_keys:
+            if request_key in skip_request_keys and ledger_key not in retry_ledger_keys:
                 logger.debug("Skipping negative-cached XBRL document %s", request_key)
                 result.requests_skipped += 1
                 continue
 
             result.requests_attempted += 1
+            if ledger_key in retry_applied:
+                retry_requests += 1
             fetch_result = call_with_retry(
                 lambda: provider.fetch_xbrl(
                     corp=corp,
@@ -221,6 +255,7 @@ def sync_dart_xbrl(
                 facts_upserted=result.facts_upserted,
                 no_data_requests=result.no_data_requests,
                 slices_skipped_no_data=slices_skipped_no_data,
+                **retry_counts(receipt_retry, len(retry_applied), retry_requests),
                 **(executor.snapshot_metrics() if executor is not None else {}),
             ),
             errors=result.errors,

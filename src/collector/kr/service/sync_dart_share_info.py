@@ -14,6 +14,11 @@ from collector.kr.ports.share_info import (
 )
 from collector.kr.ports.storage import Storage
 from collector.kr.service.collection_targets import resolve_dart_targets
+from collector.kr.service.dart_receipt_retry import (
+    ReceiptRetryPlan,
+    retry_counts,
+    slot_allowed,
+)
 from collector.kr.util.pipeline import (
     OpenDartKeyExhaustedError,
     build_run_counts,
@@ -67,12 +72,17 @@ def sync_dart_share_info(
     run_params_extra: dict[str, object] | None = None,
     capital_change_provider: CapitalChangeProvider | None = None,
     scope: UniverseScope = UniverseScope.CURRENT,
+    receipt_retry: ReceiptRetryPlan | None = None,
 ) -> DartShareInfoSyncResult:
     """Synchronise OpenDART share-count/dividend/treasury-stock raw rows.
 
     ``capital_change_provider`` is optional: when omitted, the irdsSttus
     (증자·감자 현황) request is skipped entirely so existing callers that
     only need share-count/shareholder-return keep working unchanged.
+
+    ``receipt_retry`` lists slots a filing receipt confirms: an unexpired no-data
+    verdict or negative-cache entry for them is overridden, and the report-type
+    availability gate does not apply to them. Ignored when ``force`` is set.
     """
     no_data_ttl_days = (
         None if scope is UniverseScope.HISTORICAL else DEFAULT_NO_DATA_TTL_DAYS
@@ -93,6 +103,7 @@ def sync_dart_share_info(
             "universe_scope": scope.value,
             "slice_ledger_endpoints": [LEDGER_ENDPOINTS[kind] for kind in ledger_kinds],
             "no_data_ttl_days": no_data_ttl_days,
+            **(receipt_retry.audit_params() if receipt_retry is not None else {}),
             "allowed_year_report_pairs": (
                 [f"{year}:{code}" for year, code in sorted(allowed_year_report_pairs)]
                 if allowed_year_report_pairs is not None
@@ -124,6 +135,10 @@ def sync_dart_share_info(
     }
     ledger_pending: dict[str, set[str]] = {kind: set() for kind in ledger_kinds}
     slices_skipped_no_data = 0
+    retry_slots = receipt_retry.slots if (receipt_retry and not force) else {}
+    retry_ledger_keys: set[str] = set()
+    retry_applied: dict[str, set[str]] = {kind: set() for kind in ledger_kinds}
+    retry_requests = 0
     try:
         targets = resolve_dart_targets(storage, scope, tickers)
         if not targets:
@@ -165,21 +180,38 @@ def sync_dart_share_info(
             for corp in targets
             for bsns_year in bsns_years
             for reprt_code in reprt_codes
-            if allowed_year_report_pairs is None
-            or (bsns_year, reprt_code) in allowed_year_report_pairs
+            if slot_allowed(
+                allowed_year_report_pairs, retry_slots, corp.corp_code, bsns_year, reprt_code
+            )
         ]
+        retry_keys: list[str] = []
+        if receipt_retry and not force:
+            retry_keys = receipt_retry.rank_keys(
+                (
+                    _slice_key(corp.corp_code, bsns_year, reprt_code),
+                    (corp.corp_code, bsns_year, reprt_code),
+                )
+                for corp in targets
+                for bsns_year in bsns_years
+                for reprt_code in reprt_codes
+            )
+            retry_ledger_keys = set(retry_keys)
         for kind, ledger in ledgers.items():
-            plan = ledger.plan(ledger_keys, force=force)
+            plan = ledger.plan(ledger_keys, force=force, retry_keys=retry_keys)
             ledger_pending[kind] = set(plan.pending)
+            retry_applied[kind] = set(plan.receipt_retry)
             slices_skipped_no_data += len(plan.skipped_no_data)
 
         for corp in targets:
             result.targets_processed += 1
             for bsns_year in bsns_years:
                 for reprt_code in reprt_codes:
-                    if (
-                        allowed_year_report_pairs is not None
-                        and (bsns_year, reprt_code) not in allowed_year_report_pairs
+                    if not slot_allowed(
+                        allowed_year_report_pairs,
+                        retry_slots,
+                        corp.corp_code,
+                        bsns_year,
+                        reprt_code,
                     ):
                         result.requests_skipped += len(ledger_kinds)
                         continue
@@ -196,7 +228,10 @@ def sync_dart_share_info(
                     elif (corp.corp_code, bsns_year, reprt_code) in existing_share_count_keys:
                         logger.debug("Skipping existing share_count request %s", request_prefix)
                         result.requests_skipped += 1
-                    elif share_count_key in skip_request_keys:
+                    elif (
+                        share_count_key in skip_request_keys
+                        and ledger_key not in retry_ledger_keys
+                    ):
                         logger.debug(
                             "Skipping negative-cached share_count request %s", request_prefix
                         )
@@ -204,6 +239,7 @@ def sync_dart_share_info(
                     else:
                         result.requests_attempted += 1
                         attempted_any = True
+                        retry_requests += int(ledger_key in retry_applied["share_count"])
                         share_count_result = call_with_retry(
                             lambda: share_count_provider.fetch_share_count(
                                 corp=corp,
@@ -251,12 +287,16 @@ def sync_dart_share_info(
                     ) in existing_return_keys:
                         logger.debug("Skipping existing dividend request %s", request_prefix)
                         result.requests_skipped += 1
-                    elif dividend_key in skip_request_keys:
+                    elif (
+                        dividend_key in skip_request_keys
+                        and ledger_key not in retry_ledger_keys
+                    ):
                         logger.debug("Skipping negative-cached dividend request %s", request_prefix)
                         result.requests_skipped += 1
                     else:
                         result.requests_attempted += 1
                         attempted_any = True
+                        retry_requests += int(ledger_key in retry_applied["dividend"])
                         dividend_result = call_with_retry(
                             lambda: shareholder_return_provider.fetch_dividend(
                                 corp=corp,
@@ -305,7 +345,10 @@ def sync_dart_share_info(
                     ) in existing_return_keys:
                         logger.debug("Skipping existing treasury_stock request %s", request_prefix)
                         result.requests_skipped += 1
-                    elif treasury_key in skip_request_keys:
+                    elif (
+                        treasury_key in skip_request_keys
+                        and ledger_key not in retry_ledger_keys
+                    ):
                         logger.debug(
                             "Skipping negative-cached treasury_stock request %s", request_prefix
                         )
@@ -313,6 +356,7 @@ def sync_dart_share_info(
                     else:
                         result.requests_attempted += 1
                         attempted_any = True
+                        retry_requests += int(ledger_key in retry_applied["treasury_stock"])
                         treasury_result = call_with_retry(
                             lambda: shareholder_return_provider.fetch_treasury_stock(
                                 corp=corp,
@@ -365,7 +409,10 @@ def sync_dart_share_info(
                                 "Skipping existing capital_change request %s", request_prefix
                             )
                             result.requests_skipped += 1
-                        elif capital_change_key in skip_request_keys:
+                        elif (
+                            capital_change_key in skip_request_keys
+                            and ledger_key not in retry_ledger_keys
+                        ):
                             logger.debug(
                                 "Skipping negative-cached capital_change request %s",
                                 request_prefix,
@@ -374,6 +421,7 @@ def sync_dart_share_info(
                         else:
                             result.requests_attempted += 1
                             attempted_any = True
+                            retry_requests += int(ledger_key in retry_applied["capital_change"])
                             capital_change_result = call_with_retry(
                                 lambda: capital_change_provider.fetch_capital_change(
                                     corp=corp,
@@ -431,6 +479,11 @@ def sync_dart_share_info(
                 capital_change_rows_upserted=result.capital_change_rows_upserted,
                 no_data_requests=result.no_data_requests,
                 slices_skipped_no_data=slices_skipped_no_data,
+                **retry_counts(
+                    receipt_retry,
+                    len(set().union(*retry_applied.values())),
+                    retry_requests,
+                ),
                 **(executor.snapshot_metrics() if executor is not None else {}),
             ),
             errors=result.errors,
