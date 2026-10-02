@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
+
+import pytest
 
 COLLECTOR_ROOT = Path(__file__).resolve().parents[2]
 WRAPPER = COLLECTOR_ROOT / "deploy/prod/bin/us-universe-incremental.sh"
@@ -42,6 +45,9 @@ def _run(tmp_path: Path, *extra: str) -> tuple[subprocess.CompletedProcess[str],
     return result, capture.read_text(), docker_capture.read_text()
 
 
+# The `us.lock` file only exists under the flock backend; without flock(1) the wrapper
+# falls back to a mkdir lock (sdc-wrapper.sh sdc_with_source_lock), e.g. on macOS.
+@pytest.mark.skipif(shutil.which("flock") is None, reason="flock(1) not installed")
 def test_incremental_wrapper_uses_us_lock_and_if_new(tmp_path: Path) -> None:
     result, args, docker_args = _run(tmp_path)
     assert result.returncode == 0, result.stderr
