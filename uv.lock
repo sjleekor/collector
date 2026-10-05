@@ -259,7 +259,7 @@ wheels = [
 
 [[package]]
 name = "collector"
-version = "0.15.17"
+version = "0.15.18"
 source = { editable = "." }
 dependencies = [
     { name = "duckdb" },
