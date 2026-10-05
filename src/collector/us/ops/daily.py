@@ -467,6 +467,44 @@ def run_weekly_macro(
     return run
 
 
+def run_nasdaqtrader_symdir(
+    root: DataRoot, *, force: bool = False, dry_run: bool = False
+) -> SourceRun:
+    """nasdaqtrader 심볼 디렉터리 원문. **하루 한 번**(KST), 원문만 쌓는다.
+
+    ``listing_snapshots``는 건드리지 않는다 (1단계). 같은 파일이 반복되는 날은
+    ``skipped``로 센다. 한 kind가 실패해도 다른 kind는 계속한다.
+    """
+    from collector.us.sources import nasdaqtrader_symdir as sd
+
+    run = SourceRun("nasdaqtrader_symdir")
+    now = dt.datetime.now(dt.UTC)
+    todo = [k for k in sd.KINDS if force or not sd.fetched_today(root, k, now=now)]
+    run.skipped = len(sd.KINDS) - len(todo)
+    run.pending = len(todo)
+    if dry_run or not todo:
+        return run
+
+    client = sd.SymdirClient()
+    notes = []
+    for kind in todo:
+        try:
+            result = sd.fetch_kind(client, root, kind, now=now, force=force)
+        except (sd.SymdirError, OSError) as exc:
+            run.missing.append(f"{kind}: {exc}")
+            run.ok = False
+            continue
+        if result["status"] == "written":
+            run.fetched += 1
+            notes.append(f"{kind} 새 파일({result['as_of']})")
+        else:
+            run.skipped += 1
+            notes.append(f"{kind} 같은 파일")
+    run.pending = len(run.missing)
+    run.note = "; ".join(notes)
+    return run
+
+
 #: 하루 실행이 도는 원천. 이름으로 골라 돌릴 수 있다.
 SOURCES: tuple[str, ...] = (
     "dolt",
@@ -478,6 +516,7 @@ SOURCES: tuple[str, ...] = (
     "sec_ftd",
     "sec_13f",
     "weekly_macro",
+    "nasdaqtrader_symdir",
 )
 
 
@@ -490,6 +529,7 @@ def run_daily(
     sources: tuple[str, ...] | None = None,
     dry_run: bool = False,
     force_weekly: bool = False,
+    force_symdir: bool = False,
 ) -> dict[str, object]:
     """하루치를 받는다. **어제까지가 대상이다** — 오늘 것은 아직 안 나온다.
 
@@ -534,6 +574,8 @@ def run_daily(
                     force=force_weekly,
                 )
             )
+        elif name == "nasdaqtrader_symdir":
+            runs.append(run_nasdaqtrader_symdir(root, force=force_symdir, dry_run=dry_run))
         else:
             raise ValueError(f"모르는 원천: {name!r} (있는 것: {sorted(SOURCES)})")
 

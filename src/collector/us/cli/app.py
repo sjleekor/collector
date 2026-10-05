@@ -46,6 +46,7 @@ def _handle_daily_run(args: argparse.Namespace) -> None:
         sources=sources,
         dry_run=args.dry_run,
         force_weekly=args.force_weekly,
+        force_symdir=args.force_symdir,
     )
     _print(result)
     if not result["ok"]:
@@ -228,6 +229,11 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         "--force-weekly",
         action="store_true",
         help="주간 원천(FRED·Wikipedia)의 7일 문턱을 건너뛰고 지금 받는다.",
+    )
+    daily_run.add_argument(
+        "--force-symdir",
+        action="store_true",
+        help="nasdaqtrader 심볼 디렉터리의 하루 한 번 제한을 건너뛰고 지금 받는다.",
     )
     daily_run.set_defaults(handler=_handle_daily_run)
 
