@@ -28,7 +28,7 @@ import pyarrow.parquet as pq
 from collector.lake import DataRoot
 from collector.us.sources.sec import bulk_path
 from collector.us.store.schema import ARROW_SCHEMAS
-from collector.us.store.writer import snapshot_path, verify_snapshot
+from collector.us.store.writer import snapshot_path, staged_snapshot, verify_snapshot
 
 #: 벌크 안의 CIK별 파일 이름. 넘침 파일은 이 꼴이 아니다.
 _MAIN = re.compile(r"CIK(\d{10})\.json$")
@@ -46,7 +46,10 @@ def _to_date(values: list[str | None]) -> pyar.Array:
 
 
 class _Sink:
-    """행 묶음을 최종 parquet에 곧장 흘린다 — 조각 파일을 거치지 않는다.
+    """행 묶음을 parquet에 곧장 흘린다 — 조각 파일을 거치지 않는다.
+
+    ``dest``는 **임시 경로**다. 호출하는 쪽이 :func:`staged_snapshot`으로 감싸
+    검증이 끝난 뒤에만 최종 경로로 옮긴다.
 
     1억 2천만 행을 조각으로 썼다가 다시 이어 붙이면 같은 양을 두 번 읽고 두 번
     쓴다. 한 번에 다 메모리에 올릴 수도 없으므로 ``ParquetWriter``를 열어 두고
@@ -89,6 +92,28 @@ def load_companyfacts(
     (X12). 거기에 맞춰 거르면 그 편향이 재무 데이터로 옮겨 온다. 2만 378개
     발행사 전부라도 parquet 몇 GB다.
     """
+    dest = snapshot_path(root, "fundamentals", snapshot_date)
+    with staged_snapshot(dest) as out:
+        result = _build_fundamentals(
+            root,
+            out=out,
+            observed_at=observed_at,
+            ciks=ciks,
+            rows_per_part=rows_per_part,
+        )
+    result["path"] = dest
+    return result
+
+
+def _build_fundamentals(
+    root: DataRoot,
+    *,
+    out: Path,
+    observed_at: dt.datetime | None,
+    ciks: Iterable[int] | None,
+    rows_per_part: int,
+) -> dict[str, object]:
+    """``load_companyfacts``의 본체. ``out``(임시 경로)에 쓰고 검증까지 한다."""
     observed_at = observed_at or dt.datetime.now(dt.UTC)
     zp = bulk_path(root, "companyfacts")
     rev = source_rev(zp)
@@ -100,8 +125,7 @@ def load_companyfacts(
     }
     entities = 0
     skipped_nonnumeric = 0
-    dest = snapshot_path(root, "fundamentals", snapshot_date)
-    sink = _Sink(dest, "fundamentals")
+    sink = _Sink(out, "fundamentals")
 
     def flush() -> None:
         if not cols["cik"]:
@@ -166,7 +190,7 @@ def load_companyfacts(
 
     stats = sink.close()
     return {
-        "path": dest,
+        "path": out,
         "entities": entities,
         "skipped_nonnumeric": skipped_nonnumeric,
         "source_rev": rev,
@@ -206,6 +230,37 @@ def load_submissions(
     Form 4를 내는 개인이다. ``ciks``에 발행사만 준다. ``since``보다 오래된
     공시는 버린다 — 검정 구간이 2018-07부터다.
     """
+    dest = snapshot_path(root, "filings_index", snapshot_date)
+    meta_dest = snapshot_path(root, "company_meta", snapshot_date)
+    # 표 둘을 임시에 쓰고 검증한 뒤 옮긴다. 먼저 쓴 ``with`` 항목이 나중에 옮겨지므로
+    # ``filings_index``(``needs_rebuild``가 보는 앞 표)가 **마지막에** 자리를 잡는다.
+    # 검증이 실패하면 둘 다 안 생긴다 — 이전 스냅샷이 그대로 최신이고 다음 실행이 다시 한다
+    with staged_snapshot(dest) as out, staged_snapshot(meta_dest) as meta_out:
+        result = _build_submissions(
+            root,
+            out=out,
+            meta_out=meta_out,
+            observed_at=observed_at,
+            ciks=ciks,
+            since=since,
+            rows_per_part=rows_per_part,
+        )
+    result["filings_index"]["path"] = dest  # type: ignore[index]
+    result["company_meta"]["path"] = meta_dest  # type: ignore[index]
+    return result
+
+
+def _build_submissions(
+    root: DataRoot,
+    *,
+    out: Path,
+    meta_out: Path,
+    observed_at: dt.datetime | None,
+    ciks: Iterable[int] | None,
+    since: dt.date | None,
+    rows_per_part: int,
+) -> dict[str, object]:
+    """``load_submissions``의 본체. ``out``·``meta_out``(임시 경로)에 쓰고 검증까지 한다."""
     observed_at = observed_at or dt.datetime.now(dt.UTC)
     zp = bulk_path(root, "submissions")
     rev = source_rev(zp)
@@ -220,8 +275,8 @@ def load_submissions(
     meta_rows: list[tuple] = []
     entities = 0
     duplicate_rows = 0
-    dest = snapshot_path(root, "filings_index", snapshot_date)
-    sink = _Sink(dest, "filings_index")
+    conflicting_rows = 0
+    sink = _Sink(out, "filings_index")
 
     def flush() -> None:
         if not fil["cik"]:
@@ -298,9 +353,17 @@ def load_submissions(
             for extra in overflow.get(cik, []):
                 blocks.append(json.loads(zf.read(extra)))
             # 같은 공시가 `recent`와 넘침 파일에 겹쳐 오는 일이 있다 (2026-09-19
-            # 실측 9쌍). 한 CIK 안에서 **완전히 같은 행**만 접는다 — 같은
-            # accession이 form만 다르게 두 번 색인된 것은 원천에 실제로 있다
+            # 실측 9쌍). 한 CIK 안에서 **완전히 같은 행**은 접는다 — 같은
+            # accession이 form만 다르게 두 번 색인된 것은 원천에 실제로 있다.
+            #
+            # **키(accession, form)가 같은데 내용이 다른 행**도 겹쳐 온다. 2026-10-03
+            # 실측 1쌍(CIK 1132597 `0001564590-19-045194` 6-K): 두 블록에서 접수
+            # 시각만 5시간 다르다(13:15:09Z / 18:15:09Z). EDGAR 색인 페이지의 접수
+            # 시각은 08:15:09 ET = 13:15:09Z라서 **`recent` 쪽이 맞고 넘침 파일 쪽이
+            # 틀렸다.** 블록을 `recent` → 넘침 순으로 읽으므로 **먼저 읽은 행을
+            # 남긴다** (결정적이다). 몇 행을 버렸는지 ``conflicting_rows``에 센다.
             seen: set[tuple] = set()
+            seen_keys: set[tuple] = set()
             for block in blocks:
                 for row in _filing_rows(block):
                     if since_s and (row[2] or "") < since_s:
@@ -309,6 +372,11 @@ def load_submissions(
                         duplicate_rows += 1
                         continue
                     seen.add(row)
+                    ident = (row[0], row[1])  # (accession, form)
+                    if ident in seen_keys:
+                        conflicting_rows += 1
+                        continue
+                    seen_keys.add(ident)
                     fil["cik"].append(cik)
                     for key, value in zip(
                         ("accession", "form", "filing_date", "report_date",
@@ -323,19 +391,19 @@ def load_submissions(
                 flush()
     flush()
 
-    out: dict[str, object] = {
+    summary: dict[str, object] = {
         "entities": entities,
         "source_rev": rev,
         "duplicate_rows": duplicate_rows,
+        "conflicting_rows": conflicting_rows,
     }
     # 키가 (cik, accession)이 아니다 — 한 accession이 form을 달리해 두 번
     # 색인된 것이 있다 (SC 13D/A와 SC TO-T/A, 접수 시각도 4시간 다르다)
-    out["filings_index"] = {
-        "path": dest, **sink.close(unique_on=("cik", "accession", "form"))
+    out_stats: dict[str, object] = {}
+    out_stats["filings_index"] = {
+        "path": out, **sink.close(unique_on=("cik", "accession", "form"))
     }
 
-    meta_dest = snapshot_path(root, "company_meta", snapshot_date)
-    meta_dest.parent.mkdir(parents=True, exist_ok=True)
     fields = ("cik", "name", "entity_type", "sic", "sic_description", "category",
               "fiscal_year_end", "state_of_incorporation", "ein", "tickers",
               "exchanges", "former_names")
@@ -350,11 +418,11 @@ def load_submissions(
     meta_cols["source_rev"] = pyar.array([rev] * len(meta_rows), type=pyar.string())
     pq.write_table(
         pyar.table(meta_cols).select(ARROW_SCHEMAS["company_meta"].names),
-        meta_dest,
+        meta_out,
         compression="zstd",
     )
-    out["company_meta"] = {
-        "path": meta_dest,
-        **verify_snapshot(meta_dest, "company_meta", unique_on=("cik",)),
+    out_stats["company_meta"] = {
+        "path": meta_out,
+        **verify_snapshot(meta_out, "company_meta", unique_on=("cik",)),
     }
-    return out
+    return {**summary, **out_stats}

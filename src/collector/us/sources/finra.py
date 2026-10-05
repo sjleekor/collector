@@ -363,7 +363,7 @@ def load_short_volume(
     import pyarrow.parquet as pq
 
     from collector.us.store.schema import ARROW_SCHEMAS
-    from collector.us.store.writer import snapshot_path, verify_snapshot
+    from collector.us.store.writer import snapshot_path, staged_snapshot, verify_snapshot
 
     observed_at = observed_at or dt.datetime.now(dt.UTC)
     src_dir = root.raw / "finra" / "regsho"
@@ -373,54 +373,54 @@ def load_short_volume(
 
     schema = ARROW_SCHEMAS["short_volume"]
     dest = snapshot_path(root, "short_volume", snapshot_date)
-    dest.parent.mkdir(parents=True, exist_ok=True)
     trailer_mismatch: list[str] = []
     no_exempt = 0
     written = 0
 
-    with pq.ParquetWriter(dest, schema, compression="zstd") as writer:
-        for path in files:
-            day = dt.date.fromisoformat(path.stem.split("=", 1)[1])
-            rows, trailer = parse_regsho(path.read_text())
-            if trailer is not None and trailer != len(rows):
-                trailer_mismatch.append(f"{day}:{trailer}!={len(rows)}")
-            if rows and "ShortExemptVolume" not in rows[0]:
-                no_exempt += 1
-            n = len(rows)
-            if not n:
-                continue
-            writer.write_table(
-                pyar.table(
-                    {
-                        "date": pyar.array([day] * n, type=pyar.date32()),
-                        "symbol": pyar.array(
-                            [(r.get("Symbol") or "").strip() for r in rows], type=pyar.string()
-                        ),
-                        "short_volume": pyar.array(
-                            [_num(r.get("ShortVolume")) for r in rows], type=pyar.float64()
-                        ),
-                        "short_exempt_volume": pyar.array(
-                            [_num(r.get("ShortExemptVolume")) for r in rows],
-                            type=pyar.float64(),
-                        ),
-                        "total_volume": pyar.array(
-                            [_num(r.get("TotalVolume")) for r in rows], type=pyar.float64()
-                        ),
-                        # consolidated 파일의 Market 은 venue 목록이다 ("B,Q,N").
-                        # 단일 코드로 파싱하면 틀린다 (연구 §2.4)
-                        "market": pyar.array(
-                            [(r.get("Market") or "").strip() or None for r in rows],
-                            type=pyar.string(),
-                        ),
-                        "observed_at": pyar.array(
-                            [observed_at] * n, type=pyar.timestamp("us", tz="UTC")
-                        ),
-                    }
-                ).select(schema.names).cast(schema)
-            )
-            written += n
+    with staged_snapshot(dest) as out:
+        with pq.ParquetWriter(out, schema, compression="zstd") as writer:
+            for path in files:
+                day = dt.date.fromisoformat(path.stem.split("=", 1)[1])
+                rows, trailer = parse_regsho(path.read_text())
+                if trailer is not None and trailer != len(rows):
+                    trailer_mismatch.append(f"{day}:{trailer}!={len(rows)}")
+                if rows and "ShortExemptVolume" not in rows[0]:
+                    no_exempt += 1
+                n = len(rows)
+                if not n:
+                    continue
+                writer.write_table(
+                    pyar.table(
+                        {
+                            "date": pyar.array([day] * n, type=pyar.date32()),
+                            "symbol": pyar.array(
+                                [(r.get("Symbol") or "").strip() for r in rows], type=pyar.string()
+                            ),
+                            "short_volume": pyar.array(
+                                [_num(r.get("ShortVolume")) for r in rows], type=pyar.float64()
+                            ),
+                            "short_exempt_volume": pyar.array(
+                                [_num(r.get("ShortExemptVolume")) for r in rows],
+                                type=pyar.float64(),
+                            ),
+                            "total_volume": pyar.array(
+                                [_num(r.get("TotalVolume")) for r in rows], type=pyar.float64()
+                            ),
+                            # consolidated 파일의 Market 은 venue 목록이다 ("B,Q,N").
+                            # 단일 코드로 파싱하면 틀린다 (연구 §2.4)
+                            "market": pyar.array(
+                                [(r.get("Market") or "").strip() or None for r in rows],
+                                type=pyar.string(),
+                            ),
+                            "observed_at": pyar.array(
+                                [observed_at] * n, type=pyar.timestamp("us", tz="UTC")
+                            ),
+                        }
+                    ).select(schema.names).cast(schema)
+                )
+                written += n
 
-    stats = verify_snapshot(dest, "short_volume", unique_on=("date", "symbol"))
+        stats = verify_snapshot(out, "short_volume", unique_on=("date", "symbol"))
     return {
         "path": dest,
         "files": len(files),

@@ -32,6 +32,7 @@ from __future__ import annotations
 import datetime as dt
 import re
 import zipfile
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -264,7 +265,7 @@ def extract_13f(
     """
     import duckdb
 
-    from collector.us.store.writer import snapshot_path, verify_snapshot
+    from collector.us.store.writer import snapshot_path, staged_snapshot, verify_snapshot
 
     observed_at = observed_at or dt.datetime.now(dt.UTC)
     work_dir = work_dir or (root.output / "_tmp" / "sec_13f")
@@ -366,156 +367,159 @@ def extract_13f(
         "SELECT count(*) FROM submissions_dedup"
     ).fetchone()[0]
 
-    # --- thirteenf_submissions ---
+    # 표 둘을 임시에 쓰고 검증한 뒤 옮긴다. ExitStack은 거꾸로 닫으므로 먼저 연
+    # thirteenf_submissions(needs_rebuild가 보는 앞 표)가 **마지막에** 자리를 잡는다
     dest_sub = snapshot_path(root, "thirteenf_submissions", snapshot_date)
-    dest_sub.parent.mkdir(parents=True, exist_ok=True)
-    con.execute(
-        f"""
-        COPY (
-            SELECT s.accession, s.filing_date, s.submission_type, s.filer_cik,
-                   s.period_of_report,
-                   s.submission_type LIKE '%/A'  AS is_amendment,
-                   COALESCE(n.n_rows, 0)         AS n_rows,
-                   s.observed_at, s.source_rev
-            FROM submissions_dedup s
-            LEFT JOIN n_rows_by_accession n USING (accession)
-        ) TO '{dest_sub}' (FORMAT PARQUET, COMPRESSION ZSTD)
-        """
-    )
-    sub_stats = verify_snapshot(dest_sub, "thirteenf_submissions", unique_on=("accession",))
-
-    # --- PIT 컷오프: filing_date - period_of_report > LAG_13F_DAYS 인 제출은 뺀다 ---
-    # 13F-NT/13F-NT/A 는 여기서 이미 빠진다 — 보유 표가 없어 filer 수에도 못 낀다.
-    con.execute(
-        f"""
-        CREATE OR REPLACE TEMP TABLE hr_all AS
-        SELECT *,
-               filing_date > period_of_report + INTERVAL '{LAG_13F_DAYS} days' AS after_cutoff
-        FROM submissions_dedup
-        WHERE submission_type LIKE '13F-HR%'
-        """
-    )
-    submissions_after_cutoff = con.execute(
-        "SELECT count(*) FROM hr_all WHERE after_cutoff"
-    ).fetchone()[0]
-
-    # --- 정정 대체: 컷오프 안에서, 같은 (filer_cik, period_of_report)의
-    # filing_date 최신만 ---
-    con.execute(
-        """
-        CREATE OR REPLACE TEMP TABLE hr_ranked AS
-        SELECT *,
-               row_number() OVER (
-                   PARTITION BY filer_cik, period_of_report
-                   ORDER BY filing_date DESC, accession DESC
-               ) AS rn_latest,
-               row_number() OVER (
-                   PARTITION BY filer_cik, period_of_report
-                   ORDER BY filing_date ASC, accession ASC
-               ) AS rn_first,
-               count(*) OVER (PARTITION BY filer_cik, period_of_report) AS n_versions
-        FROM hr_all
-        WHERE NOT after_cutoff
-        """
-    )
-    con.execute(
-        """
-        CREATE OR REPLACE TEMP TABLE chosen AS
-        SELECT h.*, n.n_rows AS n_rows
-        FROM hr_ranked h
-        LEFT JOIN n_rows_by_accession n USING (accession)
-        WHERE rn_latest = 1
-        """
-    )
-
-    # 부분 정정 — 정정본이 있고(n_versions >= 2) 남긴 행 수가 원본의 절반 미만.
-    # `hr_ranked`엔 n_rows가 없다(그 계산은 `chosen`에서만 join했다) — 원본 쪽도
-    # 같은 방식으로 `n_rows_by_accession`을 다시 join한다.
-    partial_amendments = con.execute(
-        """
-        SELECT count(*) FROM (
-            SELECT c.n_versions,
-                   c.n_rows                      AS kept_rows,
-                   nf.n_rows                     AS original_rows
-            FROM chosen c
-            JOIN hr_ranked f
-              ON f.filer_cik = c.filer_cik
-             AND f.period_of_report = c.period_of_report
-             AND f.rn_first = 1
-            LEFT JOIN n_rows_by_accession nf ON nf.accession = f.accession
-        )
-        WHERE n_versions >= 2
-          AND original_rows > 0
-          AND kept_rows / CAST(original_rows AS DOUBLE) < 0.5
-        """
-    ).fetchone()[0]
-
-    # 남긴 accession의 INFOTABLE 행 중 주식 보유만(SH·PUTCALL 빈 값·CUSIP 있음).
-    con.execute(
-        f"""
-        CREATE OR REPLACE TEMP TABLE filtered AS
-        SELECT i.cusip, c.period_of_report, c.filer_cik, i.sshprnamt, i.othermanager
-        FROM {info_glob} i
-        JOIN chosen c USING (accession)
-        WHERE i.sshprnamttype = 'SH' AND i.putcall IS NULL AND i.cusip IS NOT NULL
-        """
-    )
-    filtered_rows, othermanager_filled = con.execute(
-        "SELECT count(*), count(*) FILTER (WHERE othermanager IS NOT NULL) FROM filtered"
-    ).fetchone()
-    othermanager_share = (othermanager_filled / filtered_rows) if filtered_rows else 0.0
-
-    con.execute(
-        """
-        CREATE OR REPLACE TEMP TABLE n_holders_tbl AS
-        SELECT cusip, period_of_report, CAST(count(DISTINCT filer_cik) AS INTEGER) AS n_holders
-        FROM filtered GROUP BY cusip, period_of_report
-        """
-    )
-    # OTHERMANAGER 공동 보유 이중계상 방지 — (cusip, period, sshprnamt) 중복을 한 번만.
-    con.execute(
-        """
-        CREATE OR REPLACE TEMP TABLE shares_dedup AS
-        SELECT DISTINCT cusip, period_of_report, sshprnamt FROM filtered
-        """
-    )
-    con.execute(
-        """
-        CREATE OR REPLACE TEMP TABLE shares_total_tbl AS
-        SELECT cusip, period_of_report,
-               CAST(round(sum(sshprnamt)) AS BIGINT) AS shares_total
-        FROM shares_dedup GROUP BY cusip, period_of_report
-        """
-    )
-    con.execute(
-        """
-        CREATE OR REPLACE TEMP TABLE n_filers_tbl AS
-        SELECT period_of_report,
-               CAST(count(DISTINCT filer_cik) AS INTEGER) AS n_filers_total_that_period
-        FROM chosen GROUP BY period_of_report
-        """
-    )
-
     dest_holdings = snapshot_path(root, "inst_holdings_q", snapshot_date)
-    dest_holdings.parent.mkdir(parents=True, exist_ok=True)
-    con.execute(
-        f"""
-        COPY (
-            SELECT h.cusip, h.period_of_report, h.n_holders,
-                   COALESCE(s.shares_total, 0)   AS shares_total,
-                   f.n_filers_total_that_period,
-                   CAST(? AS TIMESTAMP WITH TIME ZONE) AS observed_at,
-                   CAST(? AS VARCHAR)                  AS source_rev
-            FROM n_holders_tbl h
-            LEFT JOIN shares_total_tbl s USING (cusip, period_of_report)
-            LEFT JOIN n_filers_tbl f USING (period_of_report)
-        ) TO '{dest_holdings}' (FORMAT PARQUET, COMPRESSION ZSTD)
-        """,
-        [observed_at, f"13f:{len(periods_ok)}periods"],
-    )
-    holdings_stats = verify_snapshot(
-        dest_holdings, "inst_holdings_q", unique_on=("cusip", "period_of_report")
-    )
+    with ExitStack() as stack:
+        out_sub = stack.enter_context(staged_snapshot(dest_sub))
+        out_holdings = stack.enter_context(staged_snapshot(dest_holdings))
+        # --- thirteenf_submissions ---
+        con.execute(
+            f"""
+            COPY (
+                SELECT s.accession, s.filing_date, s.submission_type, s.filer_cik,
+                       s.period_of_report,
+                       s.submission_type LIKE '%/A'  AS is_amendment,
+                       COALESCE(n.n_rows, 0)         AS n_rows,
+                       s.observed_at, s.source_rev
+                FROM submissions_dedup s
+                LEFT JOIN n_rows_by_accession n USING (accession)
+            ) TO '{out_sub}' (FORMAT PARQUET, COMPRESSION ZSTD)
+            """
+        )
+        sub_stats = verify_snapshot(out_sub, "thirteenf_submissions", unique_on=("accession",))
+
+        # --- PIT 컷오프: filing_date - period_of_report > LAG_13F_DAYS 인 제출은 뺀다 ---
+        # 13F-NT/13F-NT/A 는 여기서 이미 빠진다 — 보유 표가 없어 filer 수에도 못 낀다.
+        con.execute(
+            f"""
+            CREATE OR REPLACE TEMP TABLE hr_all AS
+            SELECT *,
+                   filing_date > period_of_report + INTERVAL '{LAG_13F_DAYS} days' AS after_cutoff
+            FROM submissions_dedup
+            WHERE submission_type LIKE '13F-HR%'
+            """
+        )
+        submissions_after_cutoff = con.execute(
+            "SELECT count(*) FROM hr_all WHERE after_cutoff"
+        ).fetchone()[0]
+
+        # --- 정정 대체: 컷오프 안에서, 같은 (filer_cik, period_of_report)의
+        # filing_date 최신만 ---
+        con.execute(
+            """
+            CREATE OR REPLACE TEMP TABLE hr_ranked AS
+            SELECT *,
+                   row_number() OVER (
+                       PARTITION BY filer_cik, period_of_report
+                       ORDER BY filing_date DESC, accession DESC
+                   ) AS rn_latest,
+                   row_number() OVER (
+                       PARTITION BY filer_cik, period_of_report
+                       ORDER BY filing_date ASC, accession ASC
+                   ) AS rn_first,
+                   count(*) OVER (PARTITION BY filer_cik, period_of_report) AS n_versions
+            FROM hr_all
+            WHERE NOT after_cutoff
+            """
+        )
+        con.execute(
+            """
+            CREATE OR REPLACE TEMP TABLE chosen AS
+            SELECT h.*, n.n_rows AS n_rows
+            FROM hr_ranked h
+            LEFT JOIN n_rows_by_accession n USING (accession)
+            WHERE rn_latest = 1
+            """
+        )
+
+        # 부분 정정 — 정정본이 있고(n_versions >= 2) 남긴 행 수가 원본의 절반 미만.
+        # `hr_ranked`엔 n_rows가 없다(그 계산은 `chosen`에서만 join했다) — 원본 쪽도
+        # 같은 방식으로 `n_rows_by_accession`을 다시 join한다.
+        partial_amendments = con.execute(
+            """
+            SELECT count(*) FROM (
+                SELECT c.n_versions,
+                       c.n_rows                      AS kept_rows,
+                       nf.n_rows                     AS original_rows
+                FROM chosen c
+                JOIN hr_ranked f
+                  ON f.filer_cik = c.filer_cik
+                 AND f.period_of_report = c.period_of_report
+                 AND f.rn_first = 1
+                LEFT JOIN n_rows_by_accession nf ON nf.accession = f.accession
+            )
+            WHERE n_versions >= 2
+              AND original_rows > 0
+              AND kept_rows / CAST(original_rows AS DOUBLE) < 0.5
+            """
+        ).fetchone()[0]
+
+        # 남긴 accession의 INFOTABLE 행 중 주식 보유만(SH·PUTCALL 빈 값·CUSIP 있음).
+        con.execute(
+            f"""
+            CREATE OR REPLACE TEMP TABLE filtered AS
+            SELECT i.cusip, c.period_of_report, c.filer_cik, i.sshprnamt, i.othermanager
+            FROM {info_glob} i
+            JOIN chosen c USING (accession)
+            WHERE i.sshprnamttype = 'SH' AND i.putcall IS NULL AND i.cusip IS NOT NULL
+            """
+        )
+        filtered_rows, othermanager_filled = con.execute(
+            "SELECT count(*), count(*) FILTER (WHERE othermanager IS NOT NULL) FROM filtered"
+        ).fetchone()
+        othermanager_share = (othermanager_filled / filtered_rows) if filtered_rows else 0.0
+
+        con.execute(
+            """
+            CREATE OR REPLACE TEMP TABLE n_holders_tbl AS
+            SELECT cusip, period_of_report, CAST(count(DISTINCT filer_cik) AS INTEGER) AS n_holders
+            FROM filtered GROUP BY cusip, period_of_report
+            """
+        )
+        # OTHERMANAGER 공동 보유 이중계상 방지 — (cusip, period, sshprnamt) 중복을 한 번만.
+        con.execute(
+            """
+            CREATE OR REPLACE TEMP TABLE shares_dedup AS
+            SELECT DISTINCT cusip, period_of_report, sshprnamt FROM filtered
+            """
+        )
+        con.execute(
+            """
+            CREATE OR REPLACE TEMP TABLE shares_total_tbl AS
+            SELECT cusip, period_of_report,
+                   CAST(round(sum(sshprnamt)) AS BIGINT) AS shares_total
+            FROM shares_dedup GROUP BY cusip, period_of_report
+            """
+        )
+        con.execute(
+            """
+            CREATE OR REPLACE TEMP TABLE n_filers_tbl AS
+            SELECT period_of_report,
+                   CAST(count(DISTINCT filer_cik) AS INTEGER) AS n_filers_total_that_period
+            FROM chosen GROUP BY period_of_report
+            """
+        )
+
+        con.execute(
+            f"""
+            COPY (
+                SELECT h.cusip, h.period_of_report, h.n_holders,
+                       COALESCE(s.shares_total, 0)   AS shares_total,
+                       f.n_filers_total_that_period,
+                       CAST(? AS TIMESTAMP WITH TIME ZONE) AS observed_at,
+                       CAST(? AS VARCHAR)                  AS source_rev
+                FROM n_holders_tbl h
+                LEFT JOIN shares_total_tbl s USING (cusip, period_of_report)
+                LEFT JOIN n_filers_tbl f USING (period_of_report)
+            ) TO '{out_holdings}' (FORMAT PARQUET, COMPRESSION ZSTD)
+            """,
+            [observed_at, f"13f:{len(periods_ok)}periods"],
+        )
+        holdings_stats = verify_snapshot(
+            out_holdings, "inst_holdings_q", unique_on=("cusip", "period_of_report")
+        )
 
     return {
         "files": len(files),

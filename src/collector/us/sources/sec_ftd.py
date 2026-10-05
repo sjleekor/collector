@@ -335,7 +335,7 @@ def extract_ftd(
     import pyarrow.parquet as pq
 
     from collector.us.store.schema import ARROW_SCHEMAS
-    from collector.us.store.writer import snapshot_path, verify_snapshot
+    from collector.us.store.writer import snapshot_path, staged_snapshot, verify_snapshot
 
     observed_at = observed_at or dt.datetime.now(dt.UTC)
     files = sorted(ftd_raw_dir(root).glob("cnsfails*.zip"))
@@ -344,7 +344,9 @@ def extract_ftd(
 
     schema = ARROW_SCHEMAS["ftd_fails"]
     dest = snapshot_path(root, "ftd_fails", snapshot_date)
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    # 표 둘을 임시에 쓰고 검증한 뒤 옮긴다. 먼저 쓴 with 항목이 나중에 옮겨지므로
+    # ftd_fails(needs_rebuild가 보는 앞 표)가 **마지막에** 자리를 잡는다
+    map_dest = snapshot_path(root, "cusip_symbol_pit", snapshot_date)
 
     trailer_counts: dict[str, int] = {}
     price_missing = 0
@@ -352,85 +354,85 @@ def extract_ftd(
     periods_ok: list[str] = []
     periods_failed: list[str] = []
 
-    with pq.ParquetWriter(dest, schema, compression="zstd") as writer:
-        for path in files:
-            m = re.match(r"cnsfails(\d{4})(\d{2})([ab])\.zip$", path.name)
-            period = period_key(int(m.group(1)), int(m.group(2)), m.group(3)) if m else path.stem
-            try:
-                text = _member_to_text(path)
-                parsed = parse_ftd_text(text)
-            except FtdError as exc:
-                periods_failed.append(f"{period}: {exc}")
-                continue
-            trailer_counts[period] = parsed.trailer_lines
-            n = len(parsed.rows)
-            if not n:
-                periods_ok.append(period)
-                continue
-            prices = [_num(r.price) for r in parsed.rows]
-            price_missing += sum(1 for p in prices if p is None)
-            writer.write_table(
-                pyar.table(
-                    {
-                        "settlement_date": pyar.array(
-                            [r.settlement_date for r in parsed.rows], type=pyar.date32()
-                        ),
-                        "cusip": pyar.array([r.cusip for r in parsed.rows], type=pyar.string()),
-                        "symbol": pyar.array(
-                            [(r.symbol or "").upper() or None for r in parsed.rows],
-                            type=pyar.string(),
-                        ),
-                        "quantity": pyar.array(
-                            [_int(r.quantity) for r in parsed.rows], type=pyar.int64()
-                        ),
-                        "description": pyar.array(
-                            [r.description for r in parsed.rows], type=pyar.string()
-                        ),
-                        "price": pyar.array(prices, type=pyar.float64()),
-                        "observed_at": pyar.array(
-                            [observed_at] * n, type=pyar.timestamp("us", tz="UTC")
-                        ),
-                        "source_rev": pyar.array([period] * n, type=pyar.string()),
-                    }
+    with staged_snapshot(dest) as out, staged_snapshot(map_dest) as map_out:
+        with pq.ParquetWriter(out, schema, compression="zstd") as writer:
+            for path in files:
+                m = re.match(r"cnsfails(\d{4})(\d{2})([ab])\.zip$", path.name)
+                period = (
+                    period_key(int(m.group(1)), int(m.group(2)), m.group(3)) if m else path.stem
                 )
-                .select(schema.names)
-                .cast(schema)
+                try:
+                    text = _member_to_text(path)
+                    parsed = parse_ftd_text(text)
+                except FtdError as exc:
+                    periods_failed.append(f"{period}: {exc}")
+                    continue
+                trailer_counts[period] = parsed.trailer_lines
+                n = len(parsed.rows)
+                if not n:
+                    periods_ok.append(period)
+                    continue
+                prices = [_num(r.price) for r in parsed.rows]
+                price_missing += sum(1 for p in prices if p is None)
+                writer.write_table(
+                    pyar.table(
+                        {
+                            "settlement_date": pyar.array(
+                                [r.settlement_date for r in parsed.rows], type=pyar.date32()
+                            ),
+                            "cusip": pyar.array([r.cusip for r in parsed.rows], type=pyar.string()),
+                            "symbol": pyar.array(
+                                [(r.symbol or "").upper() or None for r in parsed.rows],
+                                type=pyar.string(),
+                            ),
+                            "quantity": pyar.array(
+                                [_int(r.quantity) for r in parsed.rows], type=pyar.int64()
+                            ),
+                            "description": pyar.array(
+                                [r.description for r in parsed.rows], type=pyar.string()
+                            ),
+                            "price": pyar.array(prices, type=pyar.float64()),
+                            "observed_at": pyar.array(
+                                [observed_at] * n, type=pyar.timestamp("us", tz="UTC")
+                            ),
+                            "source_rev": pyar.array([period] * n, type=pyar.string()),
+                        }
+                    )
+                    .select(schema.names)
+                    .cast(schema)
+                )
+                written += n
+                periods_ok.append(period)
+
+        if written == 0:
+            raise FtdError(
+                "행을 하나도 못 썼다 — 받아 둔 zip을 전부 못 읽었거나 전부 빈 반월이다: "
+                + "; ".join(periods_failed)
             )
-            written += n
-            periods_ok.append(period)
 
-    if written == 0:
-        dest.unlink(missing_ok=True)
-        raise FtdError(
-            "행을 하나도 못 썼다 — 받아 둔 zip을 전부 못 읽었거나 전부 빈 반월이다: "
-            + "; ".join(periods_failed)
+        fails_stats = verify_snapshot(out, "ftd_fails", unique_on=None)
+
+        # cusip_symbol_pit: 방금 굳힌 ftd_fails 전체에서 (cusip, symbol) 쌍마다
+        # 관측 구간을 잰다. 파일 하나가 아니라 전체를 봐야 반월 경계를 안 끊는다.
+        con = duckdb.connect()
+        con.execute(
+            f"""
+            COPY (
+                SELECT cusip,
+                       symbol,
+                       min(settlement_date)                AS first_seen,
+                       max(settlement_date)                 AS last_seen,
+                       CAST(count(DISTINCT settlement_date) AS INTEGER) AS n_settlement_dates,
+                       CAST(? AS TIMESTAMP WITH TIME ZONE)  AS observed_at,
+                       CAST(? AS VARCHAR)                   AS source_rev
+                FROM read_parquet('{out}')
+                WHERE cusip IS NOT NULL AND symbol IS NOT NULL
+                GROUP BY cusip, symbol
+            ) TO '{map_out}' (FORMAT PARQUET, COMPRESSION ZSTD)
+            """,
+            [observed_at, f"ftd_fails:{len(periods_ok)}periods"],
         )
-
-    fails_stats = verify_snapshot(dest, "ftd_fails", unique_on=None)
-
-    # cusip_symbol_pit: 방금 굳힌 ftd_fails 전체에서 (cusip, symbol) 쌍마다
-    # 관측 구간을 잰다. 파일 하나가 아니라 전체를 봐야 반월 경계를 안 끊는다.
-    map_dest = snapshot_path(root, "cusip_symbol_pit", snapshot_date)
-    map_dest.parent.mkdir(parents=True, exist_ok=True)
-    con = duckdb.connect()
-    con.execute(
-        f"""
-        COPY (
-            SELECT cusip,
-                   symbol,
-                   min(settlement_date)                AS first_seen,
-                   max(settlement_date)                 AS last_seen,
-                   CAST(count(DISTINCT settlement_date) AS INTEGER) AS n_settlement_dates,
-                   CAST(? AS TIMESTAMP WITH TIME ZONE)  AS observed_at,
-                   CAST(? AS VARCHAR)                   AS source_rev
-            FROM read_parquet('{dest}')
-            WHERE cusip IS NOT NULL AND symbol IS NOT NULL
-            GROUP BY cusip, symbol
-        ) TO '{map_dest}' (FORMAT PARQUET, COMPRESSION ZSTD)
-        """,
-        [observed_at, f"ftd_fails:{len(periods_ok)}periods"],
-    )
-    map_stats = verify_snapshot(map_dest, "cusip_symbol_pit", unique_on=("cusip", "symbol"))
+        map_stats = verify_snapshot(map_out, "cusip_symbol_pit", unique_on=("cusip", "symbol"))
 
     return {
         "files": len(files),

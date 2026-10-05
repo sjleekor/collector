@@ -204,3 +204,44 @@ def test_budget_leaves_the_rest_pending(tmp_path) -> None:
     )
     assert out["budget_spent"] and out["pending"] == len(derive.RECIPES)
     assert all(t["reason"] == "예산이 다했다 — 다음 실행이 한다" for t in out["tables"])
+
+
+def test_failed_validation_does_not_look_up_to_date_on_the_next_run(tmp_path, monkeypatch) -> None:
+    """2026-10-03 사고: 검증 실패한 파일이 최종 경로에 남아 다음 실행이 "raw가 스냅샷보다
+    오래됐다"며 건너뛰었다. 이제 실패하면 스냅샷이 없고 다음 실행이 다시 굳힌다."""
+    import json
+    import zipfile
+
+    from collector.us.sources import sec, sec_bulk
+    from collector.us.store.writer import latest_snapshot
+
+    root = DataRoot(tmp_path)
+    (root.raw / "sec" / "bulk").mkdir(parents=True)
+    doc = {
+        "cik": "0000000123",
+        "name": "T",
+        "filings": {
+            "recent": {
+                "accessionNumber": ["a1"], "filingDate": ["2026-09-17"], "reportDate": [""],
+                "acceptanceDateTime": ["2026-09-17T22:30:24.000Z"], "act": [""], "form": ["8-K"],
+                "fileNumber": [""], "items": [""], "core_type": ["8-K"], "size": [1],
+                "isXBRL": [0], "isInlineXBRL": [0], "primaryDocument": ["a.htm"],
+            }
+        },
+    }
+    with zipfile.ZipFile(sec.bulk_path(root, "submissions"), "w") as zf:
+        zf.writestr("CIK0000000123.json", json.dumps(doc))
+
+    real = sec_bulk.verify_snapshot
+    def _boom(*a, **k):
+        raise ValueError("유일하지 않다")
+
+    monkeypatch.setattr(sec_bulk, "verify_snapshot", _boom)
+    first = derive.run_derive(root, snapshot_date="2026-10-03", tables=("submissions",))
+    assert first["ok"] is False
+    assert latest_snapshot(root, "filings_index") is None
+
+    monkeypatch.setattr(sec_bulk, "verify_snapshot", real)
+    second = derive.run_derive(root, snapshot_date="2026-10-04", tables=("submissions",))
+    assert second["ok"] is True and second["rebuilt"] == 1
+    assert latest_snapshot(root, "filings_index").parent.name == "snapshot_date=2026-10-04"

@@ -259,3 +259,141 @@ def test_prune_never_touches_the_only_snapshot(tmp_path):
     _calendar_snapshot(root, "2026-09-10", "2026-09-30")
     r = retention.prune_unchanged(root, "trading_calendar", dry_run=False)
     assert r["removed"] == [] and r["kept"] == 1
+
+
+# --- sec_quarterly: 마감 직후 분기의 404 -------------------------------------
+
+
+def _fake_sec(monkeypatch, *, status=404, only=None):
+    """네트워크 없이 ``download_quarterly``를 대신한다. ``only``(갈래 집합)만 실패한다."""
+    from collector.us.sources import sec
+
+    monkeypatch.setenv("SEC_USER_AGENT", "x/1 (a@b.c)")
+    calls: list[tuple[str, int, int]] = []
+
+    def _download(client, root, kind, year, quarter, **kw):
+        calls.append((kind, year, quarter))
+        if only is None or kind in only:
+            raise sec.SecAccessError(f"{status} https://x/{kind}", status_code=status)
+        path = sec.quarterly_path(root, kind, year, quarter)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"zip")
+        return {}
+
+    monkeypatch.setattr(sec, "download_quarterly", _download)
+    # 마감 분기 하나만 남기고 나머지는 이미 받은 것으로 둔다
+    return calls
+
+
+def _have_all_but_last(root, today):
+    from collector.us.sources import sec
+
+    last = daily._last_closed_quarter(today)
+    for kind in sec.QUARTERLY_KINDS:
+        for y, q in sec.quarters((2018, 3), last):
+            if (y, q) != last:
+                p = sec.quarterly_path(root, kind, y, q)
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_bytes(b"zip")
+
+
+def test_quarter_end_is_the_last_calendar_day():
+    assert daily._quarter_end(2026, 3) == dt.date(2026, 9, 30)
+    assert daily._quarter_end(2025, 4) == dt.date(2025, 12, 31)
+    assert daily._quarter_end(2026, 1) == dt.date(2026, 3, 31)
+
+
+def test_sec_quarterly_404_within_grace_is_not_a_failure(tmp_path, monkeypatch):
+    """마감 5일 뒤의 2026q3 404 셋은 발표 전이다 — 실패가 아니다 (2026-10-01 이후 매일 exit 1)."""
+    root = _lake(tmp_path)
+    today = dt.date(2026, 10, 5)
+    _have_all_but_last(root, today)
+    _fake_sec(monkeypatch)
+
+    run = daily.run_sec_quarterly(root, today=today)
+    assert run.ok is True
+    assert run.missing == []
+    assert run.fetched == 0
+    assert run.pending == 0  # 발표 전인 것은 "예산이 남았다"가 아니다
+    for kind in ("financial", "insider", "midas"):
+        assert f"{kind} 2026q3" in run.note
+    assert run.note.startswith("발표 전인 분기")
+
+
+def test_sec_quarterly_404_past_grace_fails_with_the_old_message(tmp_path, monkeypatch):
+    """마감 92일(2026-12-31): FSDS·내부자는 유예(90일) 밖이라 실패, MIDAS(300일)는 발표 전이다."""
+    root = _lake(tmp_path)
+    today = dt.date(2026, 12, 31)
+    assert daily._last_closed_quarter(today) == (2026, 3)
+    assert (today - dt.date(2026, 9, 30)).days == 92
+    _have_all_but_last(root, today)
+    _fake_sec(monkeypatch)
+
+    run = daily.run_sec_quarterly(root, today=today)
+    assert run.ok is False
+    assert sorted(m.split(":")[0] for m in run.missing) == [
+        "financial 2026q3",
+        "insider 2026q3",
+    ]
+    assert all("404" in m for m in run.missing)
+    assert "midas 2026q3" in run.note and "financial" not in run.note
+
+
+def test_sec_quarterly_midas_grace_ends_after_300_days(tmp_path, monkeypatch):
+    """2025q1 MIDAS는 289일 뒤에 나왔다 — 300일까지는 기다리고 그 뒤는 실패다."""
+    from collector.us.sources import sec
+
+    today = dt.date(2025, 3, 31) + dt.timedelta(days=301)  # 2026-01-26, 마감 분기는 2025q4
+    root = _lake(tmp_path)
+    last = daily._last_closed_quarter(today)
+    for kind in sec.QUARTERLY_KINDS:
+        for y, q in sec.quarters((2018, 3), last):
+            if not (kind == "midas" and (y, q) == (2025, 1)):
+                p = sec.quarterly_path(root, kind, y, q)
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_bytes(b"zip")
+    _fake_sec(monkeypatch, only={"midas"})
+
+    run = daily.run_sec_quarterly(root, today=today)
+    assert run.ok is False
+    assert [m.split(":")[0] for m in run.missing] == ["midas 2025q1"]
+    assert run.note == ""
+
+
+def test_sec_quarterly_non_404_is_always_a_failure(tmp_path, monkeypatch):
+    """403·서버 오류는 마감 직후여도 실패다 — 발표 전과 다르다."""
+    root = _lake(tmp_path)
+    today = dt.date(2026, 10, 5)
+    _have_all_but_last(root, today)
+    _fake_sec(monkeypatch, status=403)
+
+    run = daily.run_sec_quarterly(root, today=today)
+    assert run.ok is False
+    assert len(run.missing) == 3 and run.note == ""
+
+
+def test_sec_quarterly_grace_does_not_touch_other_kinds(tmp_path, monkeypatch):
+    """404가 한 갈래에만 와도 다른 갈래의 정상 다운로드는 그대로 센다."""
+    root = _lake(tmp_path)
+    today = dt.date(2026, 10, 5)
+    _have_all_but_last(root, today)
+    _fake_sec(monkeypatch, only={"midas"})
+
+    run = daily.run_sec_quarterly(root, today=today)
+    assert run.ok is True and run.fetched == 2
+    assert "midas 2026q3" in run.note and "financial" not in run.note
+
+
+def test_daily_summary_ok_stays_true_when_only_unpublished(tmp_path, monkeypatch):
+    """run_daily의 최상위 ``ok``(=exit code)가 발표 전 404로 내려가지 않는다."""
+    root = _lake(tmp_path)
+    today = dt.date(2026, 10, 5)
+    _have_all_but_last(root, today)
+    _fake_sec(monkeypatch)
+    _calendar(root, "2026-09-01", "2026-01-01", "2026-12-31")
+
+    result = daily.run_daily(
+        root, snapshot_date="2026-10-05", today=today, sources=("sec_quarterly",)
+    )
+    assert result["ok"] is True and result["pending"] == 0
+    assert result["sources"][0]["note"].startswith("발표 전인 분기")

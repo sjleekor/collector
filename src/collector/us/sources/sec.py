@@ -35,7 +35,15 @@ DEFAULT_INTERVAL_SECONDS = 5.0
 
 
 class SecAccessError(RuntimeError):
-    """SEC가 거부했거나 받은 것이 기대한 형식이 아니다."""
+    """SEC가 거부했거나 받은 것이 기대한 형식이 아니다.
+
+    ``status_code``는 HTTP 응답에서 온 실패일 때만 있다 — 호출하는 쪽이 404(아직
+    안 올라옴)와 나머지(거부·서버 오류·깨진 파일)를 가를 수 있어야 한다.
+    """
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 def user_agent_from_env(env: dict[str, str] | None = None) -> str:
@@ -163,7 +171,7 @@ class SecClient:
                 "UA에 연락처가 들어 있는지 먼저 본다 (01 §1.1). 재시도하지 않는다."
             )
         if resp.status_code not in ok:
-            raise SecAccessError(f"{resp.status_code} {url}")
+            raise SecAccessError(f"{resp.status_code} {url}", status_code=resp.status_code)
         return resp
 
     def download(self, url: str, dest: Path) -> Path:
@@ -308,7 +316,7 @@ def extract_filings_sub(
 
     import duckdb
 
-    from collector.us.store.writer import snapshot_path, verify_snapshot
+    from collector.us.store.writer import snapshot_path, staged_snapshot, verify_snapshot
 
     observed_at = observed_at or _dt.datetime.now(_dt.UTC)
     work_dir = work_dir or (root.output / "_tmp" / "filings_sub")
@@ -363,14 +371,14 @@ def extract_filings_sub(
         raise SecAccessError("분기 재무 ZIP이 하나도 없다. 먼저 받는다.")
 
     dest = snapshot_path(root, "filings_sub", snapshot_date)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    con.execute(
-        f"COPY (SELECT * FROM read_parquet('{work_dir}/*.parquet'))"
-        f" TO '{dest}' (FORMAT PARQUET, COMPRESSION ZSTD)"
-    )
+    with staged_snapshot(dest) as out:
+        con.execute(
+            f"COPY (SELECT * FROM read_parquet('{work_dir}/*.parquet'))"
+            f" TO '{out}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+        )
+        stats = verify_snapshot(out, "filings_sub", unique_on=("adsh",))
     for part in parts:
         part.unlink()
-    stats = verify_snapshot(dest, "filings_sub", unique_on=("adsh",))
     return {"path": dest, "quarters": len(parts), "missing": missing, **stats}
 
 
@@ -395,7 +403,7 @@ def extract_midas(
 
     import duckdb
 
-    from collector.us.store.writer import snapshot_path, verify_snapshot
+    from collector.us.store.writer import snapshot_path, staged_snapshot, verify_snapshot
 
     observed_at = observed_at or _dt.datetime.now(_dt.UTC)
     work_dir = work_dir or (root.output / "_tmp" / "midas")
@@ -464,7 +472,6 @@ def extract_midas(
         raise SecAccessError("MIDAS ZIP이 하나도 없다. 먼저 받는다.")
 
     dest = snapshot_path(root, "midas_security_daily", snapshot_date)
-    dest.parent.mkdir(parents=True, exist_ok=True)
 
     # 원천에 (Date, Ticker) 중복이 있다. 두 모양이다 (2026-09-19 실측, 756조합):
     #   1. 완전히 같은 행이 2~3번 (457행)
@@ -474,29 +481,30 @@ def extract_midas(
     before = con.execute(
         f"SELECT count(*) FROM read_parquet('{work_dir}/*.parquet')"
     ).fetchone()[0]
-    con.execute(
-        f"""
-        COPY (
-            SELECT * EXCLUDE (rank_filled)
-            FROM (
-                SELECT *,
-                       (mcap_rank IS NOT NULL)::INT + (turn_rank IS NOT NULL)::INT
-                     + (volatility_rank IS NOT NULL)::INT + (price_rank IS NOT NULL)::INT
-                       AS rank_filled
-                FROM read_parquet('{work_dir}/*.parquet')
-            )
-            QUALIFY row_number() OVER (
-                PARTITION BY date, ticker
-                ORDER BY rank_filled DESC,
-                         mcap_rank NULLS LAST, turn_rank NULLS LAST,
-                         volatility_rank NULLS LAST, price_rank NULLS LAST
-            ) = 1
-        ) TO '{dest}' (FORMAT PARQUET, COMPRESSION ZSTD)
-        """
-    )
+    with staged_snapshot(dest) as out:
+        con.execute(
+            f"""
+            COPY (
+                SELECT * EXCLUDE (rank_filled)
+                FROM (
+                    SELECT *,
+                           (mcap_rank IS NOT NULL)::INT + (turn_rank IS NOT NULL)::INT
+                         + (volatility_rank IS NOT NULL)::INT + (price_rank IS NOT NULL)::INT
+                           AS rank_filled
+                    FROM read_parquet('{work_dir}/*.parquet')
+                )
+                QUALIFY row_number() OVER (
+                    PARTITION BY date, ticker
+                    ORDER BY rank_filled DESC,
+                             mcap_rank NULLS LAST, turn_rank NULLS LAST,
+                             volatility_rank NULLS LAST, price_rank NULLS LAST
+                ) = 1
+            ) TO '{out}' (FORMAT PARQUET, COMPRESSION ZSTD)
+            """
+        )
+        stats = verify_snapshot(out, "midas_security_daily", unique_on=("date", "ticker"))
     for part in parts:
         part.unlink()
-    stats = verify_snapshot(dest, "midas_security_daily", unique_on=("date", "ticker"))
     return {
         "path": dest,
         "quarters": len(parts),
@@ -563,7 +571,7 @@ def extract_insider(
 
     import duckdb
 
-    from collector.us.store.writer import snapshot_path, verify_snapshot
+    from collector.us.store.writer import snapshot_path, staged_snapshot, verify_snapshot
 
     observed_at = observed_at or _dt.datetime.now(_dt.UTC)
     work_dir = work_dir or (root.output / "_tmp" / "insider")
@@ -664,13 +672,14 @@ def extract_insider(
         "missing": missing,
         "trans_without_submission": unmatched,
     }
+    # **뒤 표를 먼저 굳힌다.** ``needs_rebuild``는 앞 표(``insider_trans``)의 mtime만
+    # 보므로, 앞 표가 마지막에 자리를 잡아야 중간에 실패한 실행이 최신처럼 안 보인다
     for table, parts, unique_on, dedup in (
-        ("insider_trans", trans_parts, ("accession", "is_derivative", "trans_sk"), False),
         # 같은 공시에 같은 신고인이 두 번 오는 일이 있다(원천 중복). 하나만 남긴다
         ("insider_owners", owner_parts, ("accession", "owner_cik"), True),
+        ("insider_trans", trans_parts, ("accession", "is_derivative", "trans_sk"), False),
     ):
         dest = snapshot_path(root, table, snapshot_date)
-        dest.parent.mkdir(parents=True, exist_ok=True)
         src = "read_parquet([" + ", ".join(f"'{p}'" for p in parts) + "])"
         body = f"SELECT * FROM {src}"
         if dedup:
@@ -679,8 +688,9 @@ def extract_insider(
                 " (PARTITION BY accession, owner_cik ORDER BY source_rev) = 1"
             )
         before = con.execute(f"SELECT count(*) FROM {src}").fetchone()[0]
-        con.execute(f"COPY ({body}) TO '{dest}' (FORMAT PARQUET, COMPRESSION ZSTD)")
-        stats = verify_snapshot(dest, table, unique_on=unique_on)
+        with staged_snapshot(dest) as staged:
+            con.execute(f"COPY ({body}) TO '{staged}' (FORMAT PARQUET, COMPRESSION ZSTD)")
+            stats = verify_snapshot(staged, table, unique_on=unique_on)
         out[table] = {"path": dest, "deduped_rows": before - int(stats["rows"]), **stats}
 
     for part in trans_parts + owner_parts:

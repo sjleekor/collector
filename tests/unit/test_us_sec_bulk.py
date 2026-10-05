@@ -258,3 +258,85 @@ def test_load_submissions_since_none_keeps_everything(tmp_path):
         root, snapshot_date="2026-01-01", ciks=[123], since=None
     )
     assert r["filings_index"]["rows"] == 3
+
+
+# --- 키가 같고 내용이 다른 겹침 (2026-10-03 사고) -----------------------------
+
+
+def _conflicting_zip(path):
+    """CIK 1132597 `0001564590-19-045194` 6-K 모양: `recent`와 넘침 파일에 같은 키가
+    접수 시각만 5시간 다르게 들어 있다. EDGAR 색인의 접수 시각은 08:15:09 ET =
+    13:15:09Z라 `recent` 쪽이 맞다."""
+
+    def block(accept):
+        return {
+            "accessionNumber": ["0001564590-19-045194", "0001564590-19-045195"],
+            "filingDate": ["2019-12-04", "2019-12-05"],
+            "reportDate": ["2019-12-03", "2019-12-04"],
+            "acceptanceDateTime": [accept, "2019-12-05T14:00:00.000Z"],
+            "act": ["34", "34"],
+            "form": ["6-K", "6-K"],
+            "fileNumber": ["001-15276", "001-15276"],
+            "items": ["", ""],
+            "core_type": ["6-K", "6-K"],
+            "size": [134851, 10],
+            "isXBRL": [0, 0],
+            "isInlineXBRL": [0, 0],
+            "primaryDocument": ["a.htm", "b.htm"],
+        }
+
+    doc = {
+        "cik": "0001132597",
+        "name": "ITAU",
+        "filings": {
+            "recent": block("2019-12-04T13:15:09.000Z"),
+            "files": [{"name": "CIK0001132597-submissions-001.json"}],
+        },
+    }
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr("CIK0001132597.json", json.dumps(doc))
+        zf.writestr(
+            "CIK0001132597-submissions-001.json", json.dumps(block("2019-12-04T18:15:09.000Z"))
+        )
+
+
+def test_load_submissions_keeps_the_recent_row_when_a_key_conflicts(tmp_path):
+    root = _lake(tmp_path)
+    (root.raw / "sec" / "bulk").mkdir(parents=True)
+    _conflicting_zip(sec.bulk_path(root, "submissions"))
+
+    r = sec_bulk.load_submissions(root, snapshot_date="2026-10-03")  # 예외 없이 끝난다
+    assert r["conflicting_rows"] == 1  # 접수 시각만 다른 같은 키 한 행
+    assert r["duplicate_rows"] == 1  # 두 번째 공시(...195)는 완전히 같아 접힌다
+    assert r["filings_index"]["rows"] == 2
+
+    rows = duckdb.connect().execute(
+        f"SELECT accession, acceptance_datetime FROM '{r['filings_index']['path']}'"
+        " ORDER BY accession"
+    ).fetchall()
+    assert rows[0][1] == dt.datetime(2019, 12, 4, 13, 15, 9, tzinfo=dt.UTC)  # recent가 이긴다
+
+
+def test_load_submissions_failed_validation_leaves_no_snapshot(tmp_path, monkeypatch):
+    """검증이 실패하면 최종 경로에 아무것도 안 남고, 이전 스냅샷이 그대로 최신이다."""
+    from collector.us.store.writer import latest_snapshot, snapshot_path
+
+    root = _lake(tmp_path)
+    (root.raw / "sec" / "bulk").mkdir(parents=True)
+    _submissions_zip(sec.bulk_path(root, "submissions"))
+    old = sec_bulk.load_submissions(root, snapshot_date="2026-01-01", ciks=[123])
+    old_bytes = old["filings_index"]["path"].read_bytes()
+
+    def _boom(*a, **k):
+        raise ValueError("filings_index: 파일 안에서 키가 유일하지 않다")
+
+    monkeypatch.setattr(sec_bulk, "verify_snapshot", _boom)
+    with pytest.raises(ValueError):
+        sec_bulk.load_submissions(root, snapshot_date="2026-02-02", ciks=[123])
+
+    for table in ("filings_index", "company_meta"):
+        assert not snapshot_path(root, table, "2026-02-02").parent.exists()
+        assert latest_snapshot(root, table).parent.name == "snapshot_date=2026-01-01"
+    assert old["filings_index"]["path"].read_bytes() == old_bytes
+    leftovers = [p for p in root.derived.rglob("*") if p.is_file() and p.name != "part.parquet"]
+    assert leftovers == []

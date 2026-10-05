@@ -37,6 +37,23 @@ CALENDAR_WARN_DAYS = 180
 DEFAULT_BUDGET_SECONDS = 1_800.0
 
 
+#: 분기 ZIP이 **마감 뒤 이만큼 안에는 아직 안 올라와도 정상**인 날수. 안에서 받은
+#: 404는 "발표 전"이고 실패가 아니다. 넘은 뒤의 404는 경로가 바뀐 것일 수 있어
+#: 실패로 센다. 근거는 2026-10-05 sj2-server에서 잰 ``Last-Modified`` 마감 대비 지연이다.
+#:
+#: * ``financial``(FSDS) 8~16일, 단 2025q3 **62일**·2026q2 50일 → 90일
+#: * ``insider`` 7~9일, 단 2025q3 **49일** → 90일
+#: * ``midas`` 2025q1부터 **128~289일**(37일인 분기도 있다) → 300일
+#:   (``my/milestones/us/plan/20260927_us4_flow_features/02_lag_constants.md`` §3)
+#:
+#: 여기 없는 갈래는 유예가 없다 — 404가 곧 실패다.
+QUARTERLY_PUBLISH_GRACE_DAYS: dict[str, int] = {
+    "financial": 90,
+    "insider": 90,
+    "midas": 300,
+}
+
+
 @dataclass
 class SourceRun:
     """원천 하나의 실행 결과. **실패를 성공으로 세지 않는다.**"""
@@ -262,11 +279,23 @@ def run_sec_bulk(root: DataRoot, *, today: dt.date, dry_run: bool = False) -> So
     return run
 
 
+def _quarter_end(year: int, quarter: int) -> dt.date:
+    month = quarter * 3
+    return (dt.date(year + month // 12, month % 12 + 1, 1) - dt.timedelta(days=1))
+
+
 def run_sec_quarterly(root: DataRoot, *, today: dt.date, dry_run: bool = False) -> SourceRun:
-    """분기 ZIP 셋. **마감된 분기만 본다** — 진행 중인 분기는 아직 안 나온다."""
+    """분기 ZIP 셋. **마감된 분기만 본다** — 진행 중인 분기는 아직 안 나온다.
+
+    **마감 직후 분기는 404가 정상이다.** SEC가 분기가 끝난 뒤 며칠~몇 달 걸려
+    올리기 때문이다. 갈래별 유예(:data:`QUARTERLY_PUBLISH_GRACE_DAYS`) 안의 404는
+    ``note``에만 적고 ``missing``·``ok``에는 안 센다 — 실패가 아니고 다음 실행이
+    다시 본다. 유예를 넘긴 404와 404가 아닌 실패는 그대로 실패다.
+    """
     from collector.us.sources import sec
 
     run = SourceRun("sec_quarterly")
+    unpublished: list[str] = []
     last_closed = _last_closed_quarter(today)
     quarters = sec.quarters((2018, 3), last_closed)
     client = None
@@ -283,12 +312,22 @@ def run_sec_quarterly(root: DataRoot, *, today: dt.date, dry_run: bool = False) 
             try:
                 sec.download_quarterly(client, root, kind, year, quarter)
             except sec.SecAccessError as exc:
-                # 새 분기가 404면 경로가 바뀌었을 수 있다 — 목록 페이지를 본다
+                age = (today - _quarter_end(year, quarter)).days
+                grace = QUARTERLY_PUBLISH_GRACE_DAYS.get(kind, 0)
+                if exc.status_code == 404 and age <= grace:
+                    # 발표 전이다 — 실패가 아니고 다음 실행이 다시 본다
+                    unpublished.append(f"{kind} {year}q{quarter} (마감 {age}일, 유예 {grace}일)")
+                    continue
+                # 유예를 넘긴 404는 경로가 바뀌었을 수 있다 — 목록 페이지를 본다
                 run.missing.append(f"{kind} {year}q{quarter}: {exc}")
                 continue
             run.fetched += 1
-    run.pending = max(0, run.pending - run.fetched)
+    # 발표 전인 것은 ``pending``에서 뺀다 — ``pending``은 "예산이 모자라 남았다"는
+    # 신호라, 몇 달씩 못 받는 MIDAS가 영영 0이 안 되면 그 뜻이 흐려진다
+    run.pending = max(0, run.pending - run.fetched - len(unpublished))
     run.ok = not run.missing
+    if unpublished:
+        run.note = "발표 전인 분기: " + ", ".join(unpublished)
     return run
 
 
