@@ -28,6 +28,7 @@ def test_daily_derive_uses_us_lock_and_keeps_monthly_universe_separate(tmp_path:
         "case \"$1\" in inspect) exit 1 ;; *) exit 99 ;; esac\n"
     )
     fake_docker.chmod(0o755)
+    (tmp_path / "stock_data/us").mkdir(parents=True)
     environment = {
         **os.environ,
         "CAPTURE_ARGS": str(capture),
@@ -37,6 +38,7 @@ def test_daily_derive_uses_us_lock_and_keeps_monthly_universe_separate(tmp_path:
         "SDC_LOCK_DIR": str(tmp_path / "locks"),
         "SDC_THROTTLE_DIR": str(tmp_path / "throttle"),
         "SDC_LOCK_WAIT_SECONDS": "1",
+        "STOCK_DATA_HOST_DIR": str(tmp_path / "stock_data"),
         "SDC_US_DERIVE_DAILY_BUDGET_SECONDS": "321",
         "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
     }

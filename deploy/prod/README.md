@@ -118,7 +118,7 @@ flowchart TD
 | `sdc_daily_opendart_financials` | chain-only | `sdc_daily_opendart_share_info` | `dart-sync-financials.sh` | OpenDART 재무제표를 증분 동기화한다. 기본 lookback은 1년, attempt guard는 10,000건이다. |
 | `sdc_daily_opendart_share_info` | chain-only | `sdc_daily_opendart_xbrl` | `dart-sync-share-info.sh` | 주식수, 배당, 자기주식 관련 OpenDART 데이터를 증분 동기화한다. Cronicle script에 `DART_SHARE_INFO_MAX_ATTEMPT_TARGETS=35000` override가 있다. |
 | `sdc_daily_opendart_xbrl` | chain-only | 없음 | `dart-sync-xbrl.sh` | OpenDART XBRL 데이터를 증분 동기화한다. 기본 attempt guard는 10,000건이다. |
-| **`sdc_daily_us`** | **daily 15:00** | 없음 | **`us-daily.sh`** | **미국 raw를 하루치 받는다** (미국 계획 C8). 원천 여덟(dolt·Nasdaq 실적·FINRA regsho·FINRA 잔고·SEC 벌크·SEC 분기·**SEC FTD**·FRED/Wikipedia)을 한 명령이 순서대로 본다. **평일이 아니라 매일이다** — 할 일을 일정이 아니라 `raw/`에 무엇이 있나로 만들어서 주말 실행이 거의 공짜고, 주 1회짜리 SEC 벌크 3GB에 조용한 슬롯을 준다. `catch_up=0`인 이유도 같다: 잡 자체가 마지막으로 받은 것부터 어제까지 메꾼다. **SEC FTD**(2026-09-24 추가)는 반월 파일이라 URL을 규칙으로 못 만들어 목록 페이지를 매번 다시 읽는다 — 새 원천 요청은 반월당 하나뿐이다(`collector/src/collector/us/sources/sec_ftd.py`). |
+| **`sdc_daily_us`** | **daily 15:00** | 없음 | **`us-daily.sh`** | **미국 raw를 하루치 받는다** (미국 계획 C8). 원천 아홉(dolt·Nasdaq 실적·FINRA regsho·FINRA 잔고·SEC 벌크·SEC 분기·**SEC FTD**·**SEC 13F**·FRED/Wikipedia)을 한 명령이 순서대로 본다 (`src/collector/us/ops/daily.py`의 `SOURCES`). **평일이 아니라 매일이다** — 할 일을 일정이 아니라 `raw/`에 무엇이 있나로 만들어서 주말 실행이 거의 공짜고, 주 1회짜리 SEC 벌크 3GB에 조용한 슬롯을 준다. `catch_up=0`인 이유도 같다: 잡 자체가 마지막으로 받은 것부터 어제까지 메꾼다. **SEC FTD**(2026-09-24 추가)는 반월 파일이라 URL을 규칙으로 못 만들어 목록 페이지를 매번 다시 읽는다 — 새 원천 요청은 반월당 하나뿐이다(`collector/src/collector/us/sources/sec_ftd.py`).**SEC 13F**(`sec_13f`, v0.15.12부터)는 분기 ZIP이다. **SEC 분기**(`sec_quarterly`)의 분기 ZIP은 마감 뒤 일정 기간 안의 404를 "발표 전"으로 보고 실패로 세지 않는다 (아래 "SEC 분기 ZIP의 발표 유예"). |
 | **`sdc_daily_us_derive`** | **Sunday 16:00** | 없음 | **`us-derive.sh`** | **미국 raw를 derived 스냅샷으로 굳힌다** (미국 계획 05 §4.1). **2026-09-21 등록. `catch_up=0`·`max_children=1`.** `sdc_daily_us`는 raw만 받아서 `dolt pull`은 매일 도는데 `prices_daily` 스냅샷이 2026-09-09에 멈춰 있었다. **무엇을 굳힐지는 일정이 아니라 입력이 정한다** — dolt는 커밋 해시, 나머지는 `raw/` mtime을 스냅샷과 비교한다. 그래서 주 1회로 걸어도 분기짜리 SEC 표는 분기에 한 번만 쌓인다. 회당 약 1.5GB다. 락 도메인이 `us`라 15:00 수집과 겹치지 않는다. **유니버스는 여기 없다** — 월 1회라 `us-universe rebuild`가 따로 한다 (03 §5.3). **2026-09-24부터 `ftd_fails`·`cusip_symbol_pit`도 여기서 굳는다** — `us-load ftd`와 같은 recipe(`RECIPES["ftd"]`)를 쓴다. `SDC_US_DERIVE_TABLES` override가 `.env`에 없으므로(2026-09-24 확인) 별도 설정 없이 자동으로 포함된다. |
 | **`sdc_daily_us_nasdaq_analyst`** | **Saturday 09:00** | 없음 | **`us-nasdaq-analyst.sh`** | **Nasdaq 애널리스트 추정치를 주 1회 전진 축적한다** (source_expansion 04·99 순번 4). **2026-09-24 등록. `catch_up=0`·`max_children=1`.** 아래 절 참고. |
 
@@ -148,22 +148,26 @@ flowchart TD
 안전하다(이미 받은 심볼은 건너뛴다) — 필요하면 나중에 수요일 등에 가벼운 catch-up
 트리거를 하나 더 추가하는 것도 고려할 수 있다.
 
-### 제안 — SEC 13F 원천·파생 표 (2026-09-28, 브랜치 `us4-13f`)
+### SEC 13F 원천·파생 표 — 등록됨
 
-**아직 코드만이다. 릴리즈·배포·Cronicle 등록은 안 했다.** `us4-13f` 브랜치가
-`us-daily`에 아홉째 원천 `sec_13f`(SEC Form 13F 기관 보유, `src/collector/us/sources/sec_13f.py`)를,
-`us-derive`에 `thirteenf` recipe(`thirteenf_submissions`·`inst_holdings_q`)를 더했다 —
-FTD를 붙인 방식 그대로다. 아래는 배포될 때 이 문서에서 같이 바꿔야 할 것의 제안이다.
+`us-daily`의 아홉째 원천 `sec_13f`(SEC Form 13F 기관 보유, `src/collector/us/sources/sec_13f.py`)와
+`us-derive`의 `thirteenf` recipe(`thirteenf_submissions`·`inst_holdings_q`)는 **v0.15.12부터 배포돼 돌고 있다**
+(2026-09-28 제안 → 배포·등록 완료). 별도 Cronicle event는 없다 — 기존 `us-daily.sh`·`us-derive.sh`·`us-derive-daily.sh`가
+같은 `us` lock 안에서 처리한다. `us-derive-daily.sh`의 기본 `--tables`에도 `thirteenf`가 들어 있다.
 
-| 무엇 | 지금(2026-09-28, 이 표 기준) | 배포되면 |
-|---|---|---|
-| `sdc_daily_us` 설명 | "원천 여덟" | "원천 아홉"으로 고치고 SEC FTD 뒤에 **SEC 13F**를 더한다 |
-| `sdc_daily_us_derive` 설명 | `ftd_fails`·`cusip_symbol_pit`까지만 언급 | `thirteenf_submissions`·`inst_holdings_q`도 같은 recipe 방식(`RECIPES["thirteenf"]`)으로 굳는다는 문장을 더한다 |
-| 이미지 태그 | `v0.15.11` | 이 변경을 담아 릴리즈한 버전으로 갱신 |
+### SEC 분기 ZIP의 발표 유예 (v0.15.19)
 
-**등록을 제안하는 것이지 실제로 건 것이 아니다.** Cronicle event·compose 이미지 태그는
-그대로다 — 배포하는 사람이 릴리즈 뒤 이 절을 지우고 위 표의 "배포되면" 칸을
-실제 표·설명에 반영하면 된다.
+`sec_quarterly`는 분기 ZIP(재무제표 FSDS·내부자·MIDAS)을 받는다. 분기 마감 직후에는 ZIP이 아직 안 올라와서 404가 나는데,
+예전에는 이것도 실패로 세었다 (collector `ce66ce7`). 이제 갈래별 유예 일수(`QUARTERLY_PUBLISH_GRACE_DAYS`,
+`src/collector/us/ops/daily.py`) 안의 404는 "발표 전"으로 보고 실패로 세지 않는다. 유예가 지난 404는 경로가 바뀐 것일 수 있어 실패로 센다.
+
+| 갈래 | 유예 | 근거 (2026-10-05 sj2에서 잰 마감 대비 `Last-Modified` 지연) |
+|---|---:|---|
+| `financial` | 90일 | 보통 8\~16일, 2025q3는 62일 · 2026q2는 50일 |
+| `insider` | 90일 | 보통 7\~9일, 2025q3는 49일 |
+| `midas` | 300일 | 2025q1부터 128\~289일 |
+
+표에 없는 갈래는 유예가 없다 — 404가 곧 실패다. 유예 값은 코드 상수라 바꾸려면 릴리스가 필요하다.
 
 ## Wrapper와 lock/throttle
 
@@ -253,14 +257,28 @@ source lock은 `/tmp/sdc-locks/<domain>.lock`에 `flock`을 걸고, lock 획득 
 
 `flows-sync.sh.bak.20260425_2352`는 배포 디렉터리에 남아 있는 backup 파일이며 Cronicle event에서 호출하지 않는다.
 
-## KR raw export의 파일 소유자 (2026-10-05)
+## 컨테이너 실행 사용자와 파일 소유자 (2026-10-05)
 
-`kr-raw-parquet-export.sh`와 `kr-export-wait-ready.sh`는 컨테이너를 `--user <호출자 uid>:<gid> -e HOME=/tmp`로 돌린다. 그래서 호스트에 남는 snapshot(하루 약 7.4GB)과 증거 JSON이 root가 아니라 whi 소유다. 파일은 644, 디렉터리는 755(컨테이너 umask 022)라 다른 사용자도 읽는다.
+컨테이너는 이미지 기본이 root라 호스트에 마운트한 경로에 root 소유 파일이 남는다. whi가 지우거나 순환(rotation)할 수 없고,
+US 레이크에는 이미 root 소유 9,500여 개가 쌓였다(2026-10-05 실측: 전체 15,037개 중 9,551개, `us/raw/nasdaq/analyst_earnings_forecast`·`raw/wayback`·`raw/sec/{ftd,13f}`·
+`raw/dolt/*/.dolt/noms`(0600이라 whi가 읽지도 못한다)·`derived/snapshots/*`·`output/{_tmp,duckdb_tmp,us_price_arrivals_v1}`).
+그래서 아래 wrapper는 컨테이너를 `--user <호출자 uid>:<gid> -e HOME=/tmp`로 돌린다. 파일은 644, 디렉터리는 755(컨테이너 umask 022)라 다른 사용자도 읽는다.
 
-- 출력 경로(`kr/raw/raw_postgres/snapshot_date=<D>`, `kr/raw/_tmp`, 증거 파일)에 쓸 수 없으면 컨테이너를 띄우지 않고 **종료 코드 73**으로 끝난다. 예전 root 실행이 남긴 디렉터리가 원인이다. `--dry-run`은 호스트에 쓰지 않으므로 검사하지 않는다.
-- 배포 전에 한 번, root 권한으로 `kr/`, `kr/raw/`, `kr/raw/raw_postgres/`, `kr/raw/_tmp/`를 whi 소유로 바꿔야 한다 (`chown -R whi:whi`). sj2의 whi는 sudo에 암호가 필요하다.
-- `SDC_KR_EXPORT_RUN_AS_ROOT=1`이면 예전처럼 root로 돌리고 검사도 건너뛴다. 릴리스 없이 되돌리는 탈출구다.
-- 같은 문제가 다른 wrapper에도 있다: `us-*.sh`(US 레이크 `us/derived`·`us/raw`·`us/output`이 root 소유로 쌓인다), `flows-sync-kis.sh`(`state/kis_token.json`). 아직 고치지 않았다.
+| wrapper | 사전 검사하는 경로 |
+|---|---|
+| `kr-raw-parquet-export.sh` | `kr/raw/raw_postgres/snapshot_date=<D>` 전체, `kr/raw/_tmp` (`--dry-run`은 생략) |
+| `kr-export-wait-ready.sh` | 증거 파일 `K=<K>.json`과 그 디렉터리 |
+| `us-daily.sh`·`us-derive-daily.sh`·`us-derive.sh`·`us-universe-incremental.sh` | `us/raw`·`us/derived`·`us/output` (`--dry-run`은 생략) |
+| `us-nasdaq-analyst.sh` | `us/raw/nasdaq`만 (`--dry-run`은 생략). 다른 경로의 소유자 문제로 이 잡이 멈추지 않게 범위를 좁혔다 |
+
+- **사전 검사**: 쓸 수 없으면 컨테이너를 띄우지 않고 **종료 코드 73**으로 끝난다. KR은 출력 트리의 모든 파일을 셸에서 하나씩 보지만, US는 파일이 계속 늘어서(애널리스트 raw만 주 약 4천 개) `find ! -uid <내 uid>`로 남의 소유 항목만 걸러내고
+  (정상이면 0건, 실측 40ms 이하) 걸린 것만 쓰기·읽기 권한을 본다. 내 소유 디렉터리가 `u+wx`를 잃은 것도 본다. 레이크가 아직 없으면 가장 가까운 상위 디렉터리를 본다.
+- **탈출구**: `SDC_RUN_AS_ROOT=1`이면 모든 wrapper가 예전처럼 root로 돌리고 검사도 건너뛴다 (릴리스 없이 되돌린다). KR 두 wrapper는 옛 이름 `SDC_KR_EXPORT_RUN_AS_ROOT=1`도 같은 뜻으로 받는다. 값은 0 또는 1이다 (다르면 종료 코드 2).
+- **HOME=/tmp**: uid가 passwd에 없어 `HOME`이 `/`가 되므로 준다. dolt 전역 설정(`~/.dolt`)과 임시 파일이 컨테이너 안 `/tmp`에 생기고 컨테이너와 같이 사라진다. `/app`·`/usr/local/bin`은 읽기·실행만 하면 된다. exchange_calendars·DuckDB(`output/duckdb_tmp`)·`tempfile`은 non-root로 검증했다.
+- **`/state`**: US 작업은 쓰지 않는다 (KIS 토큰 캐시는 `flows-sync-kis.sh`만 쓴다).
+- **lock**: `/tmp/sdc-locks`의 flock 파일은 호스트에서 whi가 만든다 (컨테이너와 무관).
+- **배포 전에 한 번**: 위 경로를 root 권한으로 whi 소유로 바꿔야 한다. 안 바꾸고 배포하면 73으로 막혀 잡이 실패한다. 절차는 릴리스 노트의 배포 순서를 따른다 (`kr/` 이하와 `us/` 전체).
+- 같은 문제가 남은 wrapper: `flows-sync-kis.sh`(`state/kis_token.json`이 root 소유). 아직 고치지 않았다.
 
 ## 현재 schedule에서 특히 헷갈리기 쉬운 점
 

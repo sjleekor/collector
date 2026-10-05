@@ -17,7 +17,7 @@
 #
 # 소유자: 컨테이너를 호출한 사용자의 uid:gid로 돌려 증거 JSON이 그 사용자 소유로 남는다.
 # 증거 디렉터리·기존 K=<K>.json이 그 사용자에게 쓸 수 없으면 73으로 끝낸다.
-# SDC_KR_EXPORT_RUN_AS_ROOT=1이면 예전처럼 root로 돌린다 (kr-raw-parquet-export.sh와 같은 변수).
+# SDC_RUN_AS_ROOT=1(모든 wrapper 공통) 또는 옛 이름 SDC_KR_EXPORT_RUN_AS_ROOT=1이면 예전처럼 root로 돌린다.
 #
 # 종료 코드: 0 준비됨 / 75 deadline까지 준비 안 됨(미준비) / 1 blocked(실패·partial 등) /
 #            2 사용법 오류 / 73 증거 경로에 쓸 수 없음 / 그 밖은 검사 자체의 오류.
@@ -81,9 +81,7 @@ done
 [[ "$deadline" =~ ^[0-9]+$ ]] || die_usage "invalid --deadline-seconds: $deadline"
 
 evidence_file="${evidence_dir}/K=${feature_date}.json"
-if [[ "${SDC_KR_EXPORT_RUN_AS_ROOT:-0}" != "1" ]]; then
-  sdc_assert_host_writable "$evidence_file" || exit $?
-fi
+sdc_assert_host_writable SDC_KR_EXPORT_RUN_AS_ROOT "$evidence_file" || exit $?
 mkdir -p "$evidence_dir" || {
   sdc_log "cannot create evidence dir: $evidence_dir"
   exit 73
@@ -94,7 +92,7 @@ if [[ -z "${SDC_RUN_EXTRA_ARGS:-}" ]]; then
   export SDC_RUN_EXTRA_ARGS="-v ${evidence_dir}:${evidence_dir}"
 fi
 
-sdc_append_run_as_invoking_user || exit $?
+sdc_append_run_as_invoking_user SDC_KR_EXPORT_RUN_AS_ROOT || exit $?
 
 start_epoch="$(date +%s)"
 attempt=0

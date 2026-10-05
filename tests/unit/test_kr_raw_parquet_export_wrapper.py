@@ -154,6 +154,23 @@ def test_wrapper_run_as_root_escape_hatch(tmp_path: Path) -> None:
     assert "--user" not in capture.read_text()
 
 
+def test_wrapper_generic_run_as_root_escape_hatch(tmp_path: Path) -> None:
+    # SDC_RUN_AS_ROOT=1은 모든 wrapper 공통 탈출구다. 옛 이름과 같은 뜻이다.
+    result, capture, _ = _run_wrapper(
+        tmp_path, ["--snapshot-date", "2026-09-30"], {"SDC_RUN_AS_ROOT": "1"}
+    )
+    assert result.returncode == 0, result.stderr
+    assert "--user" not in capture.read_text()
+
+
+def test_wrapper_rejects_invalid_generic_run_as_root_value(tmp_path: Path) -> None:
+    result, capture, _ = _run_wrapper(
+        tmp_path, ["--snapshot-date", "2026-09-30"], {"SDC_RUN_AS_ROOT": "yes"}
+    )
+    assert result.returncode == 2
+    assert not capture.exists()
+
+
 def test_wrapper_rejects_invalid_run_as_root_value(tmp_path: Path) -> None:
     result, capture, _ = _run_wrapper(
         tmp_path, ["--snapshot-date", "2026-09-30"], {"SDC_KR_EXPORT_RUN_AS_ROOT": "yes"}

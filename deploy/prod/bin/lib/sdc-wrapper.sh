@@ -75,18 +75,39 @@ sdc_run_collector() {
 }
 
 # 컨테이너는 기본이 root라 호스트에 마운트한 경로에 root 소유 파일을 남긴다
-# (KR raw snapshot 약 7GB/일, 증거 JSON). whi가 지우거나 순환(rotation)할 수 없어서,
-# 호출한 사용자의 uid:gid로 컨테이너를 돌리는 옵션을 SDC_RUN_EXTRA_ARGS 뒤에 붙인다.
-# uid/gid는 박지 않고 `id`로 구한다. HOME은 uid가 passwd에 없어 `/`가 되므로 /tmp로 준다
-# (이미지의 /app·/usr/local/bin은 root 소유라도 읽기·실행만 하면 된다).
-# SDC_KR_EXPORT_RUN_AS_ROOT=1이면 붙이지 않는다 (릴리스 없이 되돌리는 탈출구).
+# (KR raw snapshot 약 7GB/일·증거 JSON, US 레이크 raw·derived·output). whi가 지우거나
+# 순환(rotation)할 수 없어서, 호출한 사용자의 uid:gid로 컨테이너를 돌리는 옵션을
+# SDC_RUN_EXTRA_ARGS 뒤에 붙인다. uid/gid는 박지 않고 `id`로 구한다.
+# HOME은 uid가 passwd에 없어 `/`가 되므로 /tmp로 준다 (dolt 전역 설정·임시 파일이 거기 생긴다.
+# 이미지의 /app·/usr/local/bin은 root 소유라도 읽기·실행만 하면 된다).
+#
+# 탈출구(릴리스 없이 되돌리기): SDC_RUN_AS_ROOT=1 — 모든 wrapper.
+# 인자로 옛 변수 이름을 주면 그것도 같은 뜻으로 받는다
+# (KR wrapper는 SDC_KR_EXPORT_RUN_AS_ROOT, 2026-10-05 v0.15.18부터 쓰던 이름).
+# 어느 쪽이든 값은 0 또는 1이다.
+#
+# 종료 코드: 0 / 2 값이 잘못됨. 탈출구가 켜졌으면 SDC_RUN_AS_ROOT_ACTIVE=1을 남긴다.
+sdc_run_as_root_requested() {
+  local legacy_var="${1:-}" name value
+  for name in SDC_RUN_AS_ROOT ${legacy_var:+"$legacy_var"}; do
+    value="${!name:-0}"
+    if [[ "$value" == "1" ]]; then
+      return 0
+    elif [[ "$value" != "0" ]]; then
+      sdc_log "invalid ${name}: ${value} (expected 0 or 1)"
+      return 2
+    fi
+  done
+  return 1
+}
+
 sdc_append_run_as_invoking_user() {
-  if [[ "${SDC_KR_EXPORT_RUN_AS_ROOT:-0}" == "1" ]]; then
-    sdc_log "container user: image default (root) by SDC_KR_EXPORT_RUN_AS_ROOT=1; host files will be root-owned"
+  local rc=0
+  sdc_run_as_root_requested "${1:-}" || rc=$?
+  if [[ "$rc" == "0" ]]; then
+    sdc_log "container user: image default (root) by SDC_RUN_AS_ROOT${1:+/$1}=1; host files will be root-owned"
     return 0
-  fi
-  if [[ "${SDC_KR_EXPORT_RUN_AS_ROOT:-0}" != "0" ]]; then
-    sdc_log "invalid SDC_KR_EXPORT_RUN_AS_ROOT: ${SDC_KR_EXPORT_RUN_AS_ROOT} (expected 0 or 1)"
+  elif [[ "$rc" == "2" ]]; then
     return 2
   fi
   local uid gid
@@ -96,13 +117,20 @@ sdc_append_run_as_invoking_user() {
   export SDC_RUN_EXTRA_ARGS
 }
 
+sdc_not_writable_hint() {
+  sdc_log "root가 만든 디렉터리·파일이다. 소유자를 $(id -un)로 바꾸거나(chown -R) 비운 뒤 다시 돌린다."
+  sdc_log "급하면 SDC_RUN_AS_ROOT=1${1:+(또는 $1=1)}로 예전처럼 root로 돌릴 수 있다 (파일이 root 소유로 남는다)."
+}
+
 # 컨테이너를 호출 사용자로 돌릴 때, 호스트의 출력 경로가 그 사용자에게 쓸 수 있는지 먼저 본다.
 # 예전 root 실행이 남긴 디렉터리·파일이 있으면 export는 몇 분 뒤 권한 오류로 죽고
 # partial 상태만 남는다. 여기서 바로 끝내고 종료 코드 73(EX_CANTCREAT)을 준다.
-# $@ = 확인할 경로들. 없는 경로는 가장 가까운 기존 상위 디렉터리를 본다.
-# 탈출구(root 실행)면 검사하지 않는다.
+# $1 = 옛 탈출구 변수 이름(없으면 ""), 나머지 = 확인할 경로들. 없는 경로는 가장 가까운 기존
+# 상위 디렉터리를 본다. 탈출구(root 실행)면 검사하지 않는다.
 sdc_assert_host_writable() {
-  if [[ "${SDC_KR_EXPORT_RUN_AS_ROOT:-0}" == "1" ]]; then
+  local legacy_var="${1:-}"
+  shift
+  if sdc_run_as_root_requested "$legacy_var"; then
     return 0
   fi
   local target probe bad path
@@ -127,11 +155,83 @@ sdc_assert_host_writable() {
     fi
     if [[ -n "$bad" ]]; then
       sdc_log "not writable by uid $(id -u): $bad (needed for $target)"
-      sdc_log "root가 만든 디렉터리·파일이다. 소유자를 $(id -un)로 바꾸거나(chown -R) 비운 뒤 다시 돌린다."
-      sdc_log "급하면 SDC_KR_EXPORT_RUN_AS_ROOT=1로 예전처럼 root로 돌릴 수 있다 (파일이 root 소유로 남는다)."
+      sdc_not_writable_hint "$legacy_var"
       return 73
     fi
   done
+}
+
+# US 레이크용 사전 검사. KR처럼 트리 전체를 파일마다 셸 루프로 보면 레이크가 커질수록
+# 느려지므로(US는 파일이 15천 개고 nasdaq 애널리스트만 주 4천 개씩 는다) 비용이 파일 수에
+# 거의 안 드는 방식으로 본다:
+#   1) find가 "내 uid 소유가 아닌" 항목만 걸러낸다 (C 속도, 정상이면 0건).
+#   2) 걸린 항목만 셸의 -w·-r로 본다. 그룹 쓰기로 다른 소유자 파일을 쓰는 경우는 통과한다.
+#   3) 내 소유 디렉터리가 소유자 쓰기·탐색(u+wx)을 잃은 것도 본다.
+# 파일 소유자를 보므로 0600 root 파일(dolt .dolt/noms)처럼 쓰기 이전에 *읽기*도 안 되는 것까지 잡는다.
+# 레이크 루트 $1(보통 ${STOCK_DATA_HOST_DIR}/us), 나머지는 그 아래 하위 트리(없으면 상위 디렉터리를 본다).
+# 탈출구(SDC_RUN_AS_ROOT=1)면 검사하지 않는다. root(euid 0)도 건너뛴다.
+sdc_assert_us_lake_writable() {
+  local lake="$1"
+  shift
+  if sdc_run_as_root_requested ""; then
+    return 0
+  fi
+  local uid sub target probe bad path
+  uid="$(id -u)"
+  for sub in "$@"; do
+    target="${lake}/${sub}"
+    probe="$target"
+    while [[ ! -e "$probe" && "$probe" != "/" ]]; do
+      probe="$(dirname "$probe")"
+    done
+    bad=""
+    if [[ ! -d "$probe" || ! -w "$probe" || ! -x "$probe" ]]; then
+      bad="$probe"
+    elif [[ -d "$target" ]]; then
+      while IFS= read -r -d '' path; do
+        if [[ ! -r "$path" || ! -w "$path" || ( -d "$path" && ! -x "$path" ) ]]; then
+          bad="$path"
+          break
+        fi
+      done < <(find "$target" ! -uid "$uid" \( -type d -o -type f \) -print0 2>/dev/null)
+      if [[ -z "$bad" ]]; then
+        # 내 소유 디렉터리가 u+wx를 잃었다 (find -perm은 BSD·GNU 모두 8진수가 통한다).
+        # `| head -n 1`로 자르면 걸린 것이 둘 이상일 때 find가 SIGPIPE를 받고, pipefail·set -e인
+        # wrapper가 메시지 없이 죽는다 — find가 첫 건에서 스스로 멈추게 한다 (-quit는 BSD·GNU 공통)
+        bad="$(find "$target" -type d -uid "$uid" \( ! -perm -200 -o ! -perm -100 \) -print -quit 2>/dev/null || true)"
+      fi
+    elif [[ -e "$target" && ! -w "$target" ]]; then
+      bad="$target"
+    fi
+    if [[ -n "$bad" ]]; then
+      sdc_log "not writable by uid ${uid}: $bad (needed for $target)"
+      sdc_not_writable_hint ""
+      return 73
+    fi
+  done
+}
+
+# 인자들에 플래그가 있는지. wrapper가 --dry-run일 때 쓰기 검사를 건너뛰는 데 쓴다.
+sdc_has_flag() {
+  local flag="$1" a
+  shift
+  for a in "$@"; do
+    [[ "$a" == "$flag" ]] && return 0
+  done
+  return 1
+}
+
+# US wrapper 공통: 컨테이너를 호출 사용자로 돌리고, 레이크 쓰기 가능성을 먼저 본다.
+# $1 = 레이크 하위 트리를 공백으로 이은 문자열, 나머지 = wrapper 인자(--dry-run이면 검사 생략).
+sdc_prepare_us_run() {
+  local subtrees="$1"
+  shift
+  sdc_append_run_as_invoking_user "" || return $?
+  if ! sdc_has_flag --dry-run "$@"; then
+    local -a subs
+    read -r -a subs <<< "$subtrees"
+    sdc_assert_us_lake_writable "${STOCK_DATA_HOST_DIR:-/home/whi/data/stock_data}/us" "${subs[@]}" || return $?
+  fi
 }
 
 sdc_run_collector_with_lock() {

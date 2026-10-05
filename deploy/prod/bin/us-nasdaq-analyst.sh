@@ -5,7 +5,7 @@
 # asOf 없음) — 오늘부터 쌓는 것 말고는 방법이 없다.
 #
 # **`us` 락 도메인을 같이 쓰지 않는다.** `us-daily.sh`(매일 15:00)·`us-derive.sh`
-# (일 16:00)는 원천 일곱을 순서대로 보는 한 실행이라 서로 겹치면 안 되지만,
+# (일 16:00)는 원천 아홉을 순서대로 보는 한 실행이라 서로 겹치면 안 되지만,
 # 이 잡은 종목당 1요청이라 전체를 돌면 몇 시간이 걸린다(04 §4). 같은 도메인을
 # 쓰면 그동안 저 둘이 lock 대기에서 막힌다. 건드리는 raw 하위 트리도 겹치지
 # 않는다 — `raw/nasdaq/analyst_earnings_forecast/`뿐이고 dolt·SEC 등은 안
@@ -32,6 +32,12 @@ args=(us-nasdaq-analyst run --budget-seconds "$BUDGET_SECONDS")
 # 손으로 부를 때 `--dry-run`·`--symbols`·`--today` 등을 넘길 수 있어야 한다.
 # Cronicle 은 인자 없이 부른다 (us-daily.sh·us-derive.sh 와 같은 이유).
 args+=("$@")
+
+
+# 컨테이너를 호출 사용자(whi) uid:gid로 돌려 레이크 파일이 root 소유로 안 남게 한다.
+# 쓸 수 없는 파일·디렉터리가 레이크에 남아 있으면(예전 root 실행) 컨테이너를 띄우기 전에
+# 종료 코드 73으로 끝낸다. 탈출구: SDC_RUN_AS_ROOT=1. `--dry-run`은 검사하지 않는다.
+sdc_prepare_us_run "raw/nasdaq" "$@" || exit $?
 
 # 자기 lock 도메인. throttle 은 `sdc_min_interval_seconds`의 기본 분기(0s)를
 # 그대로 쓴다 — 원천 간격은 이미 Python 클라이언트 안에 있다(5초, us 도메인의

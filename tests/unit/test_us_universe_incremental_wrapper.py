@@ -28,6 +28,7 @@ def _run(tmp_path: Path, *extra: str) -> tuple[subprocess.CompletedProcess[str],
         "case \"$1\" in inspect) exit 1 ;; *) exit 99 ;; esac\n"
     )
     fake_docker.chmod(0o755)
+    (tmp_path / "stock_data/us").mkdir(parents=True)
     environment = {
         **os.environ,
         "CAPTURE_ARGS": str(capture),
@@ -37,6 +38,7 @@ def _run(tmp_path: Path, *extra: str) -> tuple[subprocess.CompletedProcess[str],
         "SDC_LOCK_DIR": str(tmp_path / "locks"),
         "SDC_THROTTLE_DIR": str(tmp_path / "throttle"),
         "SDC_LOCK_WAIT_SECONDS": "1",
+        "STOCK_DATA_HOST_DIR": str(tmp_path / "stock_data"),
         "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
     }
     result = subprocess.run(

@@ -110,6 +110,12 @@ def test_run_as_root_escape_hatch(tmp_path: Path) -> None:
     assert "--user" not in capture.read_text()
 
 
+def test_generic_run_as_root_escape_hatch(tmp_path: Path) -> None:
+    result, _, capture = _run(tmp_path, K_ARGS, [0], {"SDC_RUN_AS_ROOT": "1"})
+    assert result.returncode == 0
+    assert "--user" not in capture.read_text()
+
+
 def test_unwritable_evidence_file_fails_early(tmp_path: Path) -> None:
     if os.geteuid() == 0:
         return  # root는 권한 검사를 통과한다
