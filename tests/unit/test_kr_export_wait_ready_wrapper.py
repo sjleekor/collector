@@ -9,7 +9,9 @@ from pathlib import Path
 WRAPPER = Path(__file__).resolve().parents[2] / "deploy/prod/bin/kr-export-wait-ready.sh"
 
 
-def _run(tmp_path: Path, args: list[str], codes: list[int], extra_env: dict[str, str] | None = None):
+def _run(
+    tmp_path: Path, args: list[str], codes: list[int], extra_env: dict[str, str] | None = None
+):
     fake_compose = tmp_path / "compose"
     counter = tmp_path / "count"
     capture = tmp_path / "args.txt"
