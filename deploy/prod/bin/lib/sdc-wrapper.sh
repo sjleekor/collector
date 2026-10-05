@@ -74,6 +74,66 @@ sdc_run_collector() {
   sdc_compose run --rm "${name_args[@]}" "${entry_args[@]}" "${extra_args[@]}" "$SDC_COLLECTOR_SERVICE" "$@"
 }
 
+# 컨테이너는 기본이 root라 호스트에 마운트한 경로에 root 소유 파일을 남긴다
+# (KR raw snapshot 약 7GB/일, 증거 JSON). whi가 지우거나 순환(rotation)할 수 없어서,
+# 호출한 사용자의 uid:gid로 컨테이너를 돌리는 옵션을 SDC_RUN_EXTRA_ARGS 뒤에 붙인다.
+# uid/gid는 박지 않고 `id`로 구한다. HOME은 uid가 passwd에 없어 `/`가 되므로 /tmp로 준다
+# (이미지의 /app·/usr/local/bin은 root 소유라도 읽기·실행만 하면 된다).
+# SDC_KR_EXPORT_RUN_AS_ROOT=1이면 붙이지 않는다 (릴리스 없이 되돌리는 탈출구).
+sdc_append_run_as_invoking_user() {
+  if [[ "${SDC_KR_EXPORT_RUN_AS_ROOT:-0}" == "1" ]]; then
+    sdc_log "container user: image default (root) by SDC_KR_EXPORT_RUN_AS_ROOT=1; host files will be root-owned"
+    return 0
+  fi
+  if [[ "${SDC_KR_EXPORT_RUN_AS_ROOT:-0}" != "0" ]]; then
+    sdc_log "invalid SDC_KR_EXPORT_RUN_AS_ROOT: ${SDC_KR_EXPORT_RUN_AS_ROOT} (expected 0 or 1)"
+    return 2
+  fi
+  local uid gid
+  uid="$(id -u)"
+  gid="$(id -g)"
+  SDC_RUN_EXTRA_ARGS="${SDC_RUN_EXTRA_ARGS:+${SDC_RUN_EXTRA_ARGS} }--user ${uid}:${gid} -e HOME=/tmp"
+  export SDC_RUN_EXTRA_ARGS
+}
+
+# 컨테이너를 호출 사용자로 돌릴 때, 호스트의 출력 경로가 그 사용자에게 쓸 수 있는지 먼저 본다.
+# 예전 root 실행이 남긴 디렉터리·파일이 있으면 export는 몇 분 뒤 권한 오류로 죽고
+# partial 상태만 남는다. 여기서 바로 끝내고 종료 코드 73(EX_CANTCREAT)을 준다.
+# $@ = 확인할 경로들. 없는 경로는 가장 가까운 기존 상위 디렉터리를 본다.
+# 탈출구(root 실행)면 검사하지 않는다.
+sdc_assert_host_writable() {
+  if [[ "${SDC_KR_EXPORT_RUN_AS_ROOT:-0}" == "1" ]]; then
+    return 0
+  fi
+  local target probe bad path
+  for target in "$@"; do
+    probe="$target"
+    while [[ ! -e "$probe" && "$probe" != "/" ]]; do
+      probe="$(dirname "$probe")"
+    done
+    bad=""
+    if [[ ! -d "$probe" || ! -w "$probe" || ! -x "$probe" ]]; then
+      bad="$probe"
+    elif [[ -d "$target" ]]; then
+      # find -writable은 GNU 전용이라(맥 테스트에서 안 된다) 셸의 -w로 하나씩 본다.
+      while IFS= read -r -d '' path; do
+        if [[ ! -w "$path" ]]; then
+          bad="$path"
+          break
+        fi
+      done < <(find "$target" \( -type d -o -type f \) -print0 2>/dev/null)
+    elif [[ -e "$target" && ! -w "$target" ]]; then
+      bad="$target"
+    fi
+    if [[ -n "$bad" ]]; then
+      sdc_log "not writable by uid $(id -u): $bad (needed for $target)"
+      sdc_log "root가 만든 디렉터리·파일이다. 소유자를 $(id -un)로 바꾸거나(chown -R) 비운 뒤 다시 돌린다."
+      sdc_log "급하면 SDC_KR_EXPORT_RUN_AS_ROOT=1로 예전처럼 root로 돌릴 수 있다 (파일이 root 소유로 남는다)."
+      return 73
+    fi
+  done
+}
+
 sdc_run_collector_with_lock() {
   local domain="$1"
   shift

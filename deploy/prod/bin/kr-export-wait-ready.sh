@@ -15,8 +15,12 @@
 #   -- ARGS...                       kr-export-readiness에 그대로 넘긴다
 #                                    (--min-ticker-ratio, --run-since, --required-run-types 등).
 #
+# 소유자: 컨테이너를 호출한 사용자의 uid:gid로 돌려 증거 JSON이 그 사용자 소유로 남는다.
+# 증거 디렉터리·기존 K=<K>.json이 그 사용자에게 쓸 수 없으면 73으로 끝낸다.
+# SDC_KR_EXPORT_RUN_AS_ROOT=1이면 예전처럼 root로 돌린다 (kr-raw-parquet-export.sh와 같은 변수).
+#
 # 종료 코드: 0 준비됨 / 75 deadline까지 준비 안 됨(미준비) / 1 blocked(실패·partial 등) /
-#            2 사용법 오류 / 그 밖은 검사 자체의 오류.
+#            2 사용법 오류 / 73 증거 경로에 쓸 수 없음 / 그 밖은 검사 자체의 오류.
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -77,12 +81,20 @@ done
 [[ "$deadline" =~ ^[0-9]+$ ]] || die_usage "invalid --deadline-seconds: $deadline"
 
 evidence_file="${evidence_dir}/K=${feature_date}.json"
-mkdir -p "$evidence_dir"
+if [[ "${SDC_KR_EXPORT_RUN_AS_ROOT:-0}" != "1" ]]; then
+  sdc_assert_host_writable "$evidence_file" || exit $?
+fi
+mkdir -p "$evidence_dir" || {
+  sdc_log "cannot create evidence dir: $evidence_dir"
+  exit 73
+}
 
 # 컨테이너가 호스트와 같은 경로로 증거 디렉터리를 쓰도록 마운트한다.
 if [[ -z "${SDC_RUN_EXTRA_ARGS:-}" ]]; then
   export SDC_RUN_EXTRA_ARGS="-v ${evidence_dir}:${evidence_dir}"
 fi
+
+sdc_append_run_as_invoking_user || exit $?
 
 start_epoch="$(date +%s)"
 attempt=0

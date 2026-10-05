@@ -29,6 +29,12 @@
 # 같은 경로로 한 번 더 마운트하고 출력 루트를 호스트 경로로 잡는다.
 # SDC_KR_EXPORT_HOST_PATHS=0이면 컨테이너 경로(/stock_data/...)로 적는다.
 #
+# 소유자: 컨테이너를 호출한 사용자(whi)의 uid:gid로 돌려 호스트 파일이 whi 소유로 남는다
+# (root면 whi가 지우거나 순환할 수 없다). 권한은 컨테이너 기본 umask 022라 파일 644·디렉터리 755,
+# 다른 사용자도 읽는다. 출력 경로(snapshot 디렉터리, raw/_tmp)가 이 사용자에게 쓸 수 없으면
+# (예전 root 실행이 남긴 것) export를 시작하지 않고 종료 코드 73으로 끝낸다. --dry-run은 검사하지 않는다.
+# SDC_KR_EXPORT_RUN_AS_ROOT=1이면 예전처럼 root로 돌린다 (되돌리기용).
+#
 # 락 도메인 kr_raw_export: 같은 출력 디렉터리에 export 둘이 겹치는 것만 막는다.
 # DB는 읽기 전용이라 수집 락(krx_marketdata·opendart 등)과는 공유하지 않는다.
 # 수집과 겹치지 않게 하는 것은 일정이다 (README의 제안 참고).
@@ -88,6 +94,14 @@ export SDC_RUN_ENTRYPOINT=/app/bin/raw-parquet-export-all.sh
 if [[ "${SDC_KR_EXPORT_HOST_PATHS:-1}" == "1" ]]; then
   host_dir="${STOCK_DATA_HOST_DIR:-/home/whi/data/stock_data}"
   export SDC_RUN_EXTRA_ARGS="-v ${host_dir}:${host_dir} -e SDC_RAW_PARQUET_OUTPUT_ROOT=${host_dir}/kr/raw/raw_postgres"
+fi
+
+host_dir="${STOCK_DATA_HOST_DIR:-/home/whi/data/stock_data}"
+sdc_append_run_as_invoking_user || exit $?
+if [[ "$dry_run" != "1" ]]; then
+  sdc_assert_host_writable \
+    "${host_dir}/kr/raw/raw_postgres/snapshot_date=${snapshot_date}" \
+    "${host_dir}/kr/raw/_tmp" || exit $?
 fi
 
 # 전체 export는 약 35분이다. 앞선 export나 수집이 락을 잡고 있으면 오래 기다리지 않는다.

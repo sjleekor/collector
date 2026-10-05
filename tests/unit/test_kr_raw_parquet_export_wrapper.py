@@ -41,6 +41,8 @@ def _run_wrapper(tmp_path: Path, args: list[str], extra_env: dict[str, str] | No
         "SDC_LOCK_DIR": str(tmp_path / "locks"),
         "SDC_THROTTLE_DIR": str(tmp_path / "throttle"),
         "SDC_LOCK_WAIT_SECONDS": "1",
+        # 쓰기 가능성 사전 검사가 맥·CI의 실제 경로를 보지 않도록 격리한다.
+        "STOCK_DATA_HOST_DIR": str(tmp_path / "stock_data"),
         "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
         **(extra_env or {}),
     }
@@ -108,10 +110,9 @@ def test_wrapper_defaults_to_host_path_mode(tmp_path: Path) -> None:
     result, capture, _ = _run_wrapper(tmp_path, ["--snapshot-date", "2026-09-30"])
     assert result.returncode == 0, result.stderr
     args = capture.read_text()
-    assert "-v /home/whi/data/stock_data:/home/whi/data/stock_data" in args
-    assert (
-        "-e SDC_RAW_PARQUET_OUTPUT_ROOT=/home/whi/data/stock_data/kr/raw/raw_postgres" in args
-    )
+    host = tmp_path / "stock_data"
+    assert f"-v {host}:{host}" in args
+    assert f"-e SDC_RAW_PARQUET_OUTPUT_ROOT={host}/kr/raw/raw_postgres" in args
 
 
 def test_wrapper_container_path_mode_can_be_selected(tmp_path: Path) -> None:
@@ -127,12 +128,78 @@ def test_wrapper_host_path_mode_mounts_same_path(tmp_path: Path) -> None:
     result, capture, _ = _run_wrapper(
         tmp_path,
         ["--snapshot-date", "2026-09-30"],
-        {"SDC_KR_EXPORT_HOST_PATHS": "1", "STOCK_DATA_HOST_DIR": "/srv/sd"},
+        {"SDC_KR_EXPORT_HOST_PATHS": "1", "STOCK_DATA_HOST_DIR": str(tmp_path / "sd")},
     )
     assert result.returncode == 0, result.stderr
     args = capture.read_text()
-    assert "-v /srv/sd:/srv/sd" in args
-    assert "-e SDC_RAW_PARQUET_OUTPUT_ROOT=/srv/sd/kr/raw/raw_postgres" in args
+    sd = tmp_path / "sd"
+    assert f"-v {sd}:{sd}" in args
+    assert f"-e SDC_RAW_PARQUET_OUTPUT_ROOT={sd}/kr/raw/raw_postgres" in args
+
+
+def test_wrapper_runs_container_as_invoking_user(tmp_path: Path) -> None:
+    result, capture, _ = _run_wrapper(tmp_path, ["--snapshot-date", "2026-09-30"])
+    assert result.returncode == 0, result.stderr
+    args = capture.read_text()
+    assert f"--user {os.getuid()}:{os.getgid()} -e HOME=/tmp" in args
+    # 마운트·출력 루트 옵션 뒤에 붙고, 서비스 이름 앞에 온다
+    assert args.index("-v ") < args.index("--user ") < args.index("collector --route")
+
+
+def test_wrapper_run_as_root_escape_hatch(tmp_path: Path) -> None:
+    result, capture, _ = _run_wrapper(
+        tmp_path, ["--snapshot-date", "2026-09-30"], {"SDC_KR_EXPORT_RUN_AS_ROOT": "1"}
+    )
+    assert result.returncode == 0, result.stderr
+    assert "--user" not in capture.read_text()
+
+
+def test_wrapper_rejects_invalid_run_as_root_value(tmp_path: Path) -> None:
+    result, capture, _ = _run_wrapper(
+        tmp_path, ["--snapshot-date", "2026-09-30"], {"SDC_KR_EXPORT_RUN_AS_ROOT": "yes"}
+    )
+    assert result.returncode == 2
+    assert not capture.exists()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root는 권한 검사를 통과한다")
+def test_wrapper_fails_early_on_unwritable_existing_snapshot_dir(tmp_path: Path) -> None:
+    part = (
+        tmp_path
+        / "stock_data/kr/raw/raw_postgres/snapshot_date=2026-09-30/source=sj2_remote/daily_ohlcv"
+    )
+    part.mkdir(parents=True)
+    part.chmod(0o555)  # root가 만든 디렉터리처럼 쓸 수 없다
+    try:
+        result, capture, _ = _run_wrapper(tmp_path, ["--snapshot-date", "2026-09-30"])
+        assert result.returncode == 73
+        assert "not writable" in result.stdout
+        assert "daily_ohlcv" in result.stdout
+        assert not capture.exists()  # 컨테이너를 띄우지 않았다
+        # 탈출구는 검사 없이 통과한다
+        ok, capture2, _ = _run_wrapper(
+            tmp_path, ["--snapshot-date", "2026-09-30"], {"SDC_KR_EXPORT_RUN_AS_ROOT": "1"}
+        )
+        assert ok.returncode == 0, ok.stderr
+        assert capture2.exists()
+        # --dry-run은 아무것도 쓰지 않으므로 검사하지 않는다
+        dry, _, _ = _run_wrapper(tmp_path, ["--snapshot-date", "2026-09-30", "--dry-run"])
+        assert dry.returncode == 0, dry.stderr
+    finally:
+        part.chmod(0o755)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root는 권한 검사를 통과한다")
+def test_wrapper_fails_early_when_raw_root_is_unwritable(tmp_path: Path) -> None:
+    raw = tmp_path / "stock_data/kr/raw"
+    raw.mkdir(parents=True)
+    raw.chmod(0o555)  # snapshot 디렉터리를 새로 만들 수 없다
+    try:
+        result, capture, _ = _run_wrapper(tmp_path, ["--snapshot-date", "2026-09-30"])
+        assert result.returncode == 73
+        assert not capture.exists()
+    finally:
+        raw.chmod(0o755)
 
 
 @pytest.mark.parametrize(

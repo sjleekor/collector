@@ -253,6 +253,15 @@ source lock은 `/tmp/sdc-locks/<domain>.lock`에 `flock`을 걸고, lock 획득 
 
 `flows-sync.sh.bak.20260425_2352`는 배포 디렉터리에 남아 있는 backup 파일이며 Cronicle event에서 호출하지 않는다.
 
+## KR raw export의 파일 소유자 (2026-10-05)
+
+`kr-raw-parquet-export.sh`와 `kr-export-wait-ready.sh`는 컨테이너를 `--user <호출자 uid>:<gid> -e HOME=/tmp`로 돌린다. 그래서 호스트에 남는 snapshot(하루 약 7.4GB)과 증거 JSON이 root가 아니라 whi 소유다. 파일은 644, 디렉터리는 755(컨테이너 umask 022)라 다른 사용자도 읽는다.
+
+- 출력 경로(`kr/raw/raw_postgres/snapshot_date=<D>`, `kr/raw/_tmp`, 증거 파일)에 쓸 수 없으면 컨테이너를 띄우지 않고 **종료 코드 73**으로 끝난다. 예전 root 실행이 남긴 디렉터리가 원인이다. `--dry-run`은 호스트에 쓰지 않으므로 검사하지 않는다.
+- 배포 전에 한 번, root 권한으로 `kr/`, `kr/raw/`, `kr/raw/raw_postgres/`, `kr/raw/_tmp/`를 whi 소유로 바꿔야 한다 (`chown -R whi:whi`). sj2의 whi는 sudo에 암호가 필요하다.
+- `SDC_KR_EXPORT_RUN_AS_ROOT=1`이면 예전처럼 root로 돌리고 검사도 건너뛴다. 릴리스 없이 되돌리는 탈출구다.
+- 같은 문제가 다른 wrapper에도 있다: `us-*.sh`(US 레이크 `us/derived`·`us/raw`·`us/output`이 root 소유로 쌓인다), `flows-sync-kis.sh`(`state/kis_token.json`). 아직 고치지 않았다.
+
 ## 현재 schedule에서 특히 헷갈리기 쉬운 점
 
 - `sdc_daily_krx_common`은 현재 독립 21:30 schedule이 아니다. 2026-06-16 23:00:17 KST에 `sdc_daily_krx_flows -> sdc_daily_krx_common` chain으로 변경됐다. 그 이전 history에는 21:30 독립 실행 기록이 남아 있을 수 있다.
