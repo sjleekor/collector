@@ -300,7 +300,7 @@ def test_dockerfile_builds_exporter_locked_and_ships_binary() -> None:
     assert re.search(r"apt-get install[^\n]*\bjq\b", text)
     assert "COPY bin/raw-parquet-export-all.sh" in text
     assert "export_tables.toml" in text
-    # builder(bookworm, glibc 2.36)는 최종 이미지(python:3.12-slim, trixie)보다
+    # builder(bookworm, glibc 2.36)는 최종 이미지(python:3.14-slim-trixie, glibc 2.41)보다
     # 오래된 glibc 여야 한다.
-    assert "FROM python:3.12-slim" in text
+    assert "FROM python:3.14-slim-trixie" in text
     assert "tools/raw-parquet-exporter/target" in (COLLECTOR_ROOT / ".dockerignore").read_text()
