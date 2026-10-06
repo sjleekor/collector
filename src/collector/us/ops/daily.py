@@ -16,7 +16,9 @@
 from __future__ import annotations
 
 import datetime as dt
+import sys
 import time
+import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -536,48 +538,62 @@ def run_daily(
     돌려주는 것에 ``ok``와 ``pending``이 있다. ``pending``이 0이 아니면 예산이
     모자랐다는 뜻이고 **다음 실행이 이어서 한다.**
     """
+    unknown = [n for n in (sources or ()) if n not in SOURCES]
+    if unknown:
+        raise ValueError(f"모르는 원천: {unknown[0]!r} (있는 것: {sorted(SOURCES)})")
     today = today or dt.date.today()
     until = today - dt.timedelta(days=1)
     wanted = sources or SOURCES
     budget = _Budget(budget_seconds)
     sessions = sessions_through(root, until=until)
 
+    def _run(name: str) -> SourceRun:
+        if name == "dolt":
+            return run_dolt(root, dry_run=dry_run)
+        if name == "nasdaq_earnings":
+            return run_nasdaq_earnings(root, sessions, budget=budget, dry_run=dry_run)
+        if name == "finra_regsho":
+            return run_finra_regsho(root, sessions, budget=budget, dry_run=dry_run)
+        if name == "finra_short_interest":
+            return run_finra_short_interest(
+                root, sessions, until=until, budget=budget, dry_run=dry_run
+            )
+        if name == "sec_bulk":
+            return run_sec_bulk(root, today=today, dry_run=dry_run)
+        if name == "sec_quarterly":
+            return run_sec_quarterly(root, today=today, dry_run=dry_run)
+        if name == "sec_ftd":
+            return run_sec_ftd(root, budget=budget, dry_run=dry_run)
+        if name == "sec_13f":
+            return run_sec_13f(root, budget=budget, dry_run=dry_run)
+        if name == "weekly_macro":
+            return run_weekly_macro(
+                root,
+                today=today,
+                snapshot_date=snapshot_date,
+                dry_run=dry_run,
+                force=force_weekly,
+            )
+        if name == "nasdaqtrader_symdir":
+            return run_nasdaqtrader_symdir(root, force=force_symdir, dry_run=dry_run)
+        raise ValueError(f"모르는 원천: {name!r} (있는 것: {sorted(SOURCES)})")
+
+    # **원천 하나가 죽어도 다음 원천은 돈다.** 예외는 그 원천의 실패로 남기고
+    # 종료 코드는 ``ok``가 정하니 실패가 묻히지 않는다. 원인은 stderr에 남긴다.
     runs: list[SourceRun] = []
     for name in wanted:
-        if name == "dolt":
-            runs.append(run_dolt(root, dry_run=dry_run))
-        elif name == "nasdaq_earnings":
-            runs.append(run_nasdaq_earnings(root, sessions, budget=budget, dry_run=dry_run))
-        elif name == "finra_regsho":
-            runs.append(run_finra_regsho(root, sessions, budget=budget, dry_run=dry_run))
-        elif name == "finra_short_interest":
+        try:
+            runs.append(_run(name))
+        except Exception as exc:
+            traceback.print_exc(file=sys.stderr)
             runs.append(
-                run_finra_short_interest(
-                    root, sessions, until=until, budget=budget, dry_run=dry_run
+                SourceRun(
+                    name=name,
+                    ok=False,
+                    missing=[f"{type(exc).__name__}: {exc}"],
+                    note="예외로 중단",
                 )
             )
-        elif name == "sec_bulk":
-            runs.append(run_sec_bulk(root, today=today, dry_run=dry_run))
-        elif name == "sec_quarterly":
-            runs.append(run_sec_quarterly(root, today=today, dry_run=dry_run))
-        elif name == "sec_ftd":
-            runs.append(run_sec_ftd(root, budget=budget, dry_run=dry_run))
-        elif name == "sec_13f":
-            runs.append(run_sec_13f(root, budget=budget, dry_run=dry_run))
-        elif name == "weekly_macro":
-            runs.append(
-                run_weekly_macro(
-                    root,
-                    today=today,
-                    snapshot_date=snapshot_date,
-                    dry_run=dry_run,
-                    force=force_weekly,
-                )
-            )
-        elif name == "nasdaqtrader_symdir":
-            runs.append(run_nasdaqtrader_symdir(root, force=force_symdir, dry_run=dry_run))
-        else:
-            raise ValueError(f"모르는 원천: {name!r} (있는 것: {sorted(SOURCES)})")
 
     # **캘린더가 언제 끝나는지 매번 남긴다.** 끝나고 나서 알면 늦다.
     cal_end = calendar_end(root)

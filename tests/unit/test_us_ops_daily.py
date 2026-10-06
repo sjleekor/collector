@@ -397,3 +397,48 @@ def test_daily_summary_ok_stays_true_when_only_unpublished(tmp_path, monkeypatch
     )
     assert result["ok"] is True and result["pending"] == 0
     assert result["sources"][0]["note"].startswith("발표 전인 분기")
+
+
+# ---- 원천별 격리 (2026-10-06: FRED 502가 symdir까지 막았다) ----
+
+
+def test_daily_isolates_a_source_that_raises(tmp_path, monkeypatch, capsys):
+    root = _lake(tmp_path)
+    _calendar(root, "2026-09-19", "2026-09-01", "2026-09-30")
+    calls: list[str] = []
+
+    def _boom(*a, **kw):
+        raise RuntimeError("DGS10: None")
+
+    def _symdir(*a, **kw):
+        calls.append("symdir")
+        return daily.SourceRun(name="nasdaqtrader_symdir")
+
+    monkeypatch.setattr(daily, "run_weekly_macro", _boom)
+    monkeypatch.setattr(daily, "run_nasdaqtrader_symdir", _symdir)
+    result = daily.run_daily(
+        root,
+        snapshot_date="2026-09-19",
+        today=dt.date(2026, 9, 9),
+        sources=("weekly_macro", "nasdaqtrader_symdir"),
+    )
+    by = {s["name"]: s for s in result["sources"]}
+    assert calls == ["symdir"]
+    assert by["weekly_macro"]["ok"] is False
+    assert by["weekly_macro"]["missing"] == ["RuntimeError: DGS10: None"]
+    assert by["nasdaqtrader_symdir"]["ok"] is True
+    assert result["ok"] is False
+    assert "Traceback" in capsys.readouterr().err
+
+
+def test_daily_unknown_source_fails_before_any_source_runs(tmp_path, monkeypatch):
+    root = _lake(tmp_path)
+    _calendar(root, "2026-09-19", "2026-09-01", "2026-09-30")
+    monkeypatch.setattr(daily, "run_dolt", lambda *a, **kw: pytest.fail("돌면 안 된다"))
+    with pytest.raises(ValueError, match="모르는 원천"):
+        daily.run_daily(
+            root,
+            snapshot_date="2026-09-19",
+            today=dt.date(2026, 9, 9),
+            sources=("dolt", "nope"),
+        )

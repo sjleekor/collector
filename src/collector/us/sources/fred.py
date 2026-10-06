@@ -65,6 +65,32 @@ _VINTAGE_CAP = re.compile(r"There are (\d+) vintage dates")
 _NO_ALFRED = re.compile(r"does not exist in ALFRED")
 
 
+#: 5xx·메시지 없는 오류의 재시도. 2026-10-04~06 15:00에 502가 사흘 이어졌다.
+RETRY_ATTEMPTS = 3
+RETRY_BACKOFF_SECONDS = 5.0
+
+
+def _is_transient(exc: BaseException) -> bool:
+    """상류 일시 장애인가. 4xx(vintage 한도·ALFRED 없음 포함)는 아니다.
+
+    ``fredapi``는 ``HTTPError``를 잡아 ``ValueError(본문 message)``로 다시 던진다.
+    상태 코드는 ``__context__``에 남으니 5xx면 그것으로 가른다. 본문이 XML이
+    아니면 ``ParseError``, 본문에 message가 없으면 ``ValueError(None)``이 오는데
+    둘 다 오류 본문을 못 읽은 경우라 일시 장애로 본다.
+    """
+    from urllib.error import HTTPError, URLError
+    from xml.etree.ElementTree import ParseError
+
+    cause = exc if isinstance(exc, HTTPError) else exc.__context__
+    if isinstance(cause, HTTPError):
+        return cause.code >= 500
+    if isinstance(exc, URLError):
+        return True
+    if isinstance(exc, ValueError | ParseError):
+        return not exc.args or exc.args[0] is None or isinstance(exc, ParseError)
+    return False
+
+
 class FredError(RuntimeError):
     """FRED가 거부했거나 받은 것이 기대한 형식이 아니다."""
 
@@ -101,12 +127,22 @@ class FredClient:
             time.sleep(self.interval_seconds - gap)
 
     def _call(self, name: str, *args, **kw):
-        self._wait()
-        try:
-            return getattr(self._fred, name)(*args, **kw)
-        finally:
-            self._last_request_at = time.monotonic()
-            self.requests_made += 1
+        """요청 하나. 일시 장애(5xx)면 간격을 늘려 다시 시도한다. 시도마다 간격·집계를 지킨다."""
+        for attempt in range(RETRY_ATTEMPTS):
+            self._wait()
+            try:
+                return getattr(self._fred, name)(*args, **kw)
+            except Exception as exc:
+                if not _is_transient(exc):
+                    raise
+                if attempt == RETRY_ATTEMPTS - 1:
+                    raise FredError(
+                        f"{name}: 상류 장애가 {RETRY_ATTEMPTS}번 이어졌다 — {exc!r}"
+                    ) from exc
+                time.sleep(RETRY_BACKOFF_SECONDS * 2**attempt)
+            finally:
+                self._last_request_at = time.monotonic()
+                self.requests_made += 1
 
     def vintage_dates(self, series_id: str) -> list:
         return list(self._call("get_series_vintage_dates", series_id))
