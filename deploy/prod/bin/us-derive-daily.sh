@@ -6,7 +6,9 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$script_dir/lib/sdc-wrapper.sh"
 
-TABLES="${SDC_US_DERIVE_DAILY_TABLES:-prices-daily,corp-actions,volatility-daily,short-interest,short-volume,earnings-calendar,nasdaq-analyst-estimates,fundamentals,submissions,insider,filings-sub,midas,ftd,thirteenf,trading-calendar}"
+# listing-snapshots-v2: 15:00 us-daily가 받은 nasdaqtrader 원문을 16:30 universe v2 증분 전에 굳힌다.
+# v1 입력(listing-snapshots)은 일부러 넣지 않는다 — 4차 전진 등록 §9.
+TABLES="${SDC_US_DERIVE_DAILY_TABLES:-prices-daily,corp-actions,volatility-daily,short-interest,short-volume,earnings-calendar,nasdaq-analyst-estimates,fundamentals,submissions,insider,filings-sub,midas,ftd,thirteenf,trading-calendar,listing-snapshots-v2}"
 BUDGET_SECONDS="${SDC_US_DERIVE_DAILY_BUDGET_SECONDS:-7200}"
 
 args=(us-derive run --tables "$TABLES" --budget-seconds "$BUDGET_SECONDS")

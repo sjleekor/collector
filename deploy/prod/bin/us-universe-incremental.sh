@@ -12,6 +12,13 @@ source "$script_dir/lib/sdc-wrapper.sh"
 args=(us-universe incremental --if-new)
 # 손으로 부를 때 `--dry-run` 을 넘길 수 있어야 한다 (us-derive-daily.sh 와 같다).
 args+=("$@")
+# v1 이 끝난 **뒤에** universe_daily_v2 증분을 잇는다. v2 가 실패해도 이 래퍼의 종료 코드는
+# v1 결과 그대로다 (실패는 출력의 v2 항목과 output/universe_v2/runs.jsonl 에 남는다).
+# Cronicle 이벤트는 바꾸지 않는다. 끄려면 SDC_US_UNIVERSE_V2=0.
+# 첫 한 번은 `collector us-universe-v2 rebuild` 를 손으로 돌려야 증분이 시작된다.
+if [[ "${SDC_US_UNIVERSE_V2:-1}" != "0" ]]; then
+  args+=(--v2)
+fi
 
 
 # 컨테이너를 호출 사용자(whi) uid:gid로 돌려 레이크 파일이 root 소유로 안 남게 한다.

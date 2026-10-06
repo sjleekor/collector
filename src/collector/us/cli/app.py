@@ -137,24 +137,77 @@ def _handle_derive_run(args: argparse.Namespace) -> None:
 
 def _handle_universe_rebuild(args: argparse.Namespace) -> None:
     from collector.us.universe import build
+    from collector.us.universe.v2 import ops as v2_ops
 
+    root = _root(args)
+    snapshot_date = _snapshot_date(args)
     kwargs = {"start": args.start}
     if args.end:
         kwargs["end"] = args.end
-    _print(
-        build.build_universe_daily(
-            _root(args), snapshot_date=_snapshot_date(args), **kwargs
-        )
+    result = build.build_universe_daily(root, snapshot_date=snapshot_date, **kwargs)
+    # v1 은 dolt symbol 현재값을 쓴다. 그 커밋을 빌드마다 따로 남긴다 (v1 빌더는 안 바꾼다).
+    v2_ops.record_v1_dolt_commit(
+        root, snapshot_date=snapshot_date, kind="rebuild", v1_result=result
     )
+    _print(result)
 
 
 def _handle_universe_incremental(args: argparse.Namespace) -> None:
     from collector.us.universe import build
+    from collector.us.universe.v2 import ops as v2_ops
 
-    _print(build.build_universe_incremental(
-        _root(args), snapshot_date=_snapshot_date(args),
-        if_new=args.if_new, dry_run=args.dry_run,
-    ))
+    root = _root(args)
+    snapshot_date = _snapshot_date(args)
+    result = build.build_universe_incremental(
+        root, snapshot_date=snapshot_date, if_new=args.if_new, dry_run=args.dry_run
+    )
+    built = not (args.dry_run or result.get("skipped"))
+    if built:
+        v2_ops.record_v1_dolt_commit(
+            root, snapshot_date=snapshot_date, kind="incremental", v1_result=result
+        )
+    payload = dict(result)
+    # v2 는 v1 이 끝난 **뒤에** 잇는다. v2 가 실패해도 v1 결과와 종료 코드는 그대로다.
+    if args.v2 and not args.dry_run:
+        payload["v2"] = v2_ops.run_v2_after_v1(root, snapshot_date=snapshot_date)
+    _print(payload)
+
+
+def _handle_universe_v2(args: argparse.Namespace) -> None:
+    import dataclasses
+    from pathlib import Path
+
+    from collector.us.universe.v2 import build as v2_build
+    from collector.us.universe.v2.config import DEFAULT_RULES
+
+    # 플래그가 없으면 rebuild 는 기본 규칙, incremental 은 직전 빌드의 규칙을 따른다.
+    rules = None
+    if args.spac_release_name_change or args.dorm_known_by_corroboration:
+        rules = dataclasses.replace(
+            DEFAULT_RULES,
+            spac_release_name_change=args.spac_release_name_change,
+            dorm_known_at_resume=not args.dorm_known_by_corroboration,
+        )
+    kwargs: dict[str, object] = {}
+    if args.mode == "rebuild":
+        if args.start:
+            kwargs["start"] = args.start
+    else:
+        kwargs["if_new"] = args.if_new
+    if args.end:
+        kwargs["end"] = args.end
+    if args.ticker_map_parquet:
+        kwargs["ticker_map_parquet"] = Path(args.ticker_map_parquet)
+    _print(
+        v2_build.build_universe_v2(
+            _root(args),
+            snapshot_date=_snapshot_date(args),
+            mode=args.mode,
+            dry_run=args.dry_run,
+            rules=rules,
+            **kwargs,
+        )
+    )
 
 
 def _handle_nasdaq_analyst_run(args: argparse.Namespace) -> None:
@@ -341,7 +394,51 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help="검사만 하고 snapshot을 쓰지 않는다.",
     )
+    uni_extend.add_argument(
+        "--v2",
+        action="store_true",
+        help="v1 이 끝난 뒤 universe_daily_v2 증분을 잇는다. v2 가 실패해도 v1 결과와 "
+        "종료 코드는 그대로다 (실패는 출력의 v2 항목과 output/universe_v2/runs.jsonl 에 남는다).",
+    )
     uni_extend.set_defaults(handler=_handle_universe_incremental)
+
+    v2_parser = subparsers.add_parser(
+        "us-universe-v2",
+        help="유니버스 v2 — 종목 구간·증권 마스터·universe_daily_v2 (설계 20261006_universe_v2).",
+    )
+    v2_sub = v2_parser.add_subparsers(dest="us_universe_v2_command", required=True)
+    for mode, help_text in (
+        ("rebuild", "처음부터 다시 판정한다. 첫 한 번은 이걸로 만든다."),
+        ("incremental", "직전 완료 snapshot 뒤의 새 세션만 잇는다. 이미 굳은 달은 안 바꾼다."),
+    ):
+        v2_cmd = _common(v2_sub.add_parser(mode, help=help_text))
+        v2_cmd.add_argument("--end", default=None, help="기본은 prices_daily 마지막 날.")
+        v2_cmd.add_argument("--dry-run", action="store_true", help="검사만 하고 쓰지 않는다.")
+        v2_cmd.add_argument(
+            "--ticker-map-parquet",
+            default=None,
+            help="(symbol, cik, as_of) parquet. Wayback company_tickers 스냅샷이 없는 레이크에서 "
+            "검증 빌드를 돌릴 때만 쓴다.",
+        )
+        v2_cmd.add_argument(
+            "--spac-release-name-change",
+            action="store_true",
+            help="설계 7장 보조 규칙(5.06 없는 합병). 측정 전이라 기본은 끈다.",
+        )
+        v2_cmd.add_argument(
+            "--dorm-known-by-corroboration",
+            action="store_true",
+            help="G_dorm 을 설계 그대로 보강 신호가 알려진 때 인지한다. 기본은 재개일(T7 일치).",
+        )
+        if mode == "rebuild":
+            v2_cmd.add_argument("--start", default=None, help="기본은 2018-09-07.")
+        else:
+            v2_cmd.add_argument(
+                "--if-new",
+                action="store_true",
+                help="새 XNYS 세션이 없거나 같은 snapshot_date 파티션이 있으면 skipped 로 끝낸다.",
+            )
+        v2_cmd.set_defaults(handler=_handle_universe_v2, mode=mode)
 
     prune_parser = _common(
         subparsers.add_parser(

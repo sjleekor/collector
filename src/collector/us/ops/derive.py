@@ -118,6 +118,13 @@ RECIPES: dict[str, Recipe] = {
         ("listing_snapshots",),
         raw_inputs=("wayback/symdir",),
     ),
+    # v2 전용 상장 목록. Wayback 원문에 **매일 받는 nasdaqtrader 원문**을 더해 같은 파서로
+    # 읽는다. `listing_snapshots`(v1 입력)는 그대로 둔다 — 공유 표에 안 쓴다 (설계 2.4).
+    "listing-snapshots-v2": Recipe(
+        "collector.us.universe.v2.inputs:build_listing_snapshots_v2",
+        ("listing_snapshots_v2",),
+        raw_inputs=("wayback/symdir", "nasdaqtrader/symdir"),
+    ),
     # 한 로더가 표 둘을 낸다 — `submissions`(`filings_index`·`company_meta`)와
     # 같은 모양이다. `ftd_fails`가 앞이라 `needs_rebuild`가 그 스냅샷 mtime을
     # 본다 — `cusip_symbol_pit`는 그 스냅샷에서 파생하므로 같이 굳는다.
@@ -150,6 +157,10 @@ RECIPES: dict[str, Recipe] = {
 #: ``us-derive`` 를 안 거치고 굳는 표. **왜 안 거치는지**를 같이 적는다.
 NOT_DERIVED: dict[str, str] = {
     "universe_daily": "us-universe rebuild — 월 1회 재판정 (03 §5.3)",
+    # v2 셋은 한 번에 만든다 — 마스터가 식별 표를, 멤버십이 마스터를 읽는다 (설계 02 §2).
+    "security_segments": "us-universe-v2 rebuild|incremental — universe_daily_v2 와 같이",
+    "security_master": "us-universe-v2 rebuild|incremental — universe_daily_v2 와 같이",
+    "universe_daily_v2": "us-universe-v2 rebuild|incremental — 월 1회 재판정, v1 뒤에 이어 붙인다",
     "macro_series": "us-daily 의 weekly_macro — FRED, 주 1회",
     "index_constituents": "us-daily 의 weekly_macro — Wikipedia, 주 1회",
 }

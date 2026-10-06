@@ -647,6 +647,77 @@ NASDAQ_ANALYST_ESTIMATES_ARROW = pyar.schema(
 )
 
 
+# --- 유니버스 v2 표 넷 (설계 20261006_universe_v2/02 §2) ---------------------------
+# v1(universe_daily·listing_snapshots)과 **섞지 않는다.** v2 입력은 이 표에만 쓴다.
+#
+# ``listing_snapshots_v2`` 는 listing_snapshots 와 열이 같다. Wayback 원문에 **매일 받는
+# nasdaqtrader 원문**(raw/nasdaqtrader/symdir)을 더해 만든다.
+
+LISTING_SNAPSHOTS_V2_ARROW = LISTING_SNAPSHOTS_ARROW
+
+# ``security_segments``: 심볼 재사용을 가른 종목 구간. 키는 (symbol, segment_no, view).
+# ``view=pit`` 은 ``usable_from`` 부터 쓰는 판정용, ``view=post`` 는 사건일부터 쓰는
+# 진단용이다(사후 정정을 알아야 해서 판정에 못 쓴다). 첫 구간(``SYMBOL#1``)은
+# ``event_date``·``known_at``·``usable_from`` 이 비고 ``seg_start`` 도 비어 있다.
+
+SECURITY_SEGMENTS_ARROW = pyar.schema(
+    [
+        ("symbol", pyar.string()),
+        ("segment_no", pyar.int32()),
+        ("security_id", pyar.string()),  # SYMBOL#segment_no
+        ("view", pyar.string()),  # pit | post
+        ("seg_start", pyar.date32()),  # 구간 시작(사건일). 첫 구간은 null
+        ("seg_end", pyar.date32()),  # 구간 마지막 날(다음 사건일 전날). 열려 있으면 null
+        ("event_date", pyar.date32()),  # 새 가격 계열이 시작한 날
+        ("known_at", pyar.date32()),  # 그 분리를 알 수 있었던 날
+        ("usable_from", pyar.date32()),  # known_at 다음 거래일. pit 에서 이 날부터 쓴다
+        ("split_reason", pyar.string()),  # G_corr | G_dorm | G_gap252 | S_dorm
+        ("identified", pyar.bool_()),  # 보강 신호가 있어 옛 구간의 cik·이름을 무효로 두나
+        ("cik", pyar.int64()),  # 구간 첫 가격일의 cik. 참고용
+        ("cik_known_at", pyar.date32()),  # 그 cik 를 붙일 수 있게 된 날(지도 스냅샷일)
+        ("cusip6", pyar.string()),  # 구간 시작 무렵의 CUSIP 앞 6자리. 참고용
+        ("rule_version", pyar.string()),
+        ("observed_at", pyar.timestamp("us", tz="UTC")),
+    ]
+)
+
+# ``security_master``: 구간별 증권 종류. 키는 (security_id, valid_from). 월 첫 거래일마다 판정한
+# 것을 같은 판정이 이어지는 동안 한 행으로 묶었다. ``valid_to`` 는 **포함하지 않는** 끝이다.
+
+SECURITY_MASTER_ARROW = pyar.schema(
+    [
+        ("security_id", pyar.string()),
+        ("valid_from", pyar.date32()),
+        ("valid_to", pyar.date32()),  # 다음 판정 시작(미포함). 열려 있으면 null
+        ("issuer_kind", pyar.string()),  # operating | registered_fund | bdc | spac | unknown
+        ("security_type", pyar.string()),
+        ("include", pyar.bool_()),
+        ("reason_code", pyar.string()),
+        ("source_code", pyar.string()),
+        ("rule_version", pyar.string()),
+        ("observed_at", pyar.timestamp("us", tz="UTC")),
+    ]
+)
+
+# ``universe_daily_v2``: 키는 (date, security_id). 그날 가격이 있는 (심볼, 구간)마다 한 행이다.
+# 멤버십은 달 단위로 정하고(달 M 은 달 M-1 통계), 구간이 달 중간에 새로 알려지면 그 구간은
+# 그 달에 판정하지 않는다(``segment_not_judged``).
+
+UNIVERSE_DAILY_V2_ARROW = pyar.schema(
+    [
+        ("date", pyar.date32()),
+        ("symbol", pyar.string()),
+        ("security_id", pyar.string()),
+        ("cik", pyar.int64()),  # 판정한 달의 구간 cik(무효로 둔 것은 null)
+        ("security_type", pyar.string()),
+        ("in_universe", pyar.bool_()),
+        ("exclusion_reason", pyar.string()),  # 멤버면 null
+        ("rule_version", pyar.string()),
+        ("observed_at", pyar.timestamp("us", tz="UTC")),
+    ]
+)
+
+
 ARROW_SCHEMAS: dict[str, pyar.Schema] = {
     "prices_daily": PRICES_DAILY_ARROW,
     "corp_actions": CORP_ACTIONS_ARROW,
@@ -671,6 +742,10 @@ ARROW_SCHEMAS: dict[str, pyar.Schema] = {
     "nasdaq_analyst_estimates": NASDAQ_ANALYST_ESTIMATES_ARROW,
     "thirteenf_submissions": THIRTEENF_SUBMISSIONS_ARROW,
     "inst_holdings_q": INST_HOLDINGS_Q_ARROW,
+    "listing_snapshots_v2": LISTING_SNAPSHOTS_V2_ARROW,
+    "security_segments": SECURITY_SEGMENTS_ARROW,
+    "security_master": SECURITY_MASTER_ARROW,
+    "universe_daily_v2": UNIVERSE_DAILY_V2_ARROW,
 }
 
 FRAME_SCHEMAS: dict[str, pa.DataFrameSchema] = {

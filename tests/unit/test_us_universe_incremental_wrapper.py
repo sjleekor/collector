@@ -13,7 +13,9 @@ COLLECTOR_ROOT = Path(__file__).resolve().parents[2]
 WRAPPER = COLLECTOR_ROOT / "deploy/prod/bin/us-universe-incremental.sh"
 
 
-def _run(tmp_path: Path, *extra: str) -> tuple[subprocess.CompletedProcess[str], str, str]:
+def _run(
+    tmp_path: Path, *extra: str, env: dict[str, str] | None = None
+) -> tuple[subprocess.CompletedProcess[str], str, str]:
     fake_compose = tmp_path / "compose"
     fake_bin = tmp_path / "fake-bin"
     fake_bin.mkdir()
@@ -40,6 +42,7 @@ def _run(tmp_path: Path, *extra: str) -> tuple[subprocess.CompletedProcess[str],
         "SDC_LOCK_WAIT_SECONDS": "1",
         "STOCK_DATA_HOST_DIR": str(tmp_path / "stock_data"),
         "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+        **(env or {}),
     }
     result = subprocess.run(
         [str(WRAPPER), *extra], env=environment, text=True, capture_output=True
@@ -66,3 +69,17 @@ def test_incremental_wrapper_passes_dry_run_through(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert "us-universe incremental --if-new --dry-run" in args
 
+
+
+def test_incremental_wrapper_chains_v2_after_v1_by_default(tmp_path: Path) -> None:
+    """같은 컨테이너·같은 `us` lock 에서 v1 뒤에 v2 를 잇는다. Cronicle 이벤트는 그대로다."""
+    result, args, _docker_args = _run(tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert "us-universe incremental --if-new --v2" in args
+
+
+def test_incremental_wrapper_can_turn_v2_off(tmp_path: Path) -> None:
+    result, args, _docker_args = _run(tmp_path, env={"SDC_US_UNIVERSE_V2": "0"})
+    assert result.returncode == 0, result.stderr
+    assert "us-universe incremental --if-new" in args
+    assert "--v2" not in args
