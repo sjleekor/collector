@@ -13,8 +13,8 @@ RUN apt-get update \
 
 # raw-parquet-exporter 는 sj2 DB 의 raw 표를 parquet 로 내보내는 Rust 바이너리다.
 # sj2 에는 toolchain 이 없고 셸에서 crate 를 받지도 않는다 — 이미지 빌드(GitHub
-# Actions)에서 만들어 이미지에 넣는다. 최종 이미지(python:3.12-slim)는 2026-09-30
-# 기준 Debian 13 trixie(glibc 2.41)다. builder 는 더 오래된 bookworm(glibc 2.36)이라
+# Actions)에서 만들어 이미지에 넣는다. 최종 이미지(python:3.14-slim-trixie)는
+# Debian 13 trixie(glibc 2.41)로 고정했다. builder 는 더 오래된 bookworm(glibc 2.36)이라
 # 여기서 링크한 바이너리가 새 glibc 에서도 돈다(반대 방향은 안 된다). 의존 crate 는 순수
 # Rust + zstd-sys(정적 C)라 openssl 같은 공유 라이브러리가 더 필요 없다.
 # rust-version 1.83 이상이면 되고 1.90 은 그 위다. 더 고정하려면 tag 뒤에
@@ -29,7 +29,8 @@ RUN cargo build --locked --release \
     && install -m 0755 target/release/raw-parquet-exporter /usr/local/bin/raw-parquet-exporter \
     && /usr/local/bin/raw-parquet-exporter --help >/dev/null
 
-FROM python:3.12-slim
+# 런타임은 2026-10-07 에 Python 3.14 로 옮겼다 — sj2 serving venv(3.14.8)와 맞춘다.
+FROM python:3.14-slim-trixie
 
 LABEL org.opencontainers.image.source="https://github.com/sjleekor/collector"
 
@@ -37,6 +38,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never \
+    UV_PYTHON=/usr/local/bin/python3 \
     TZ=Asia/Seoul \
     SDC_RAW_PARQUET_BIN=/usr/local/bin/raw-parquet-exporter \
     PATH="/app/.venv/bin:${PATH}"
@@ -47,7 +50,9 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates tzdata jq \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=ghcr.io/astral-sh/uv:0.6.14 /uv /uvx /bin/
+# uv 는 sj2-server 에 깔린 버전(0.12.23)에 맞춰 고정한다 — uv.lock 처리를 같게 하고,
+# 옛 0.6.x 는 Python 3.14 보다 먼저 나왔다.
+COPY --from=ghcr.io/astral-sh/uv:0.12.23 /uv /uvx /bin/
 COPY --from=dolt /usr/local/bin/dolt /usr/local/bin/dolt
 COPY --from=raw-parquet-exporter /usr/local/bin/raw-parquet-exporter /usr/local/bin/raw-parquet-exporter
 
