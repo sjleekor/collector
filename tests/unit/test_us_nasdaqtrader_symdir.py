@@ -1,8 +1,9 @@
-"""nasdaqtrader 심볼 디렉터리 원문 수집. 네트워크 없이 HTTP를 가짜로 바꾼다."""
+"""nasdaqtrader 심볼 디렉터리 원문 수집. 네트워크 없이 FTP를 가짜로 바꾼다."""
 
 from __future__ import annotations
 
 import datetime as dt
+import ftplib
 import gzip
 
 import pytest
@@ -165,11 +166,110 @@ def test_notice_created_and_not_overwritten(tmp_path):
     assert "Copyright © 2021, The Nasdaq, Inc. All rights reserved." in text
     assert "2026-10-06" in text and "06_nasdaq_trader.md" in text
     assert "nasdaqlisted.txt" in text
+    assert "ftp://ftp.nasdaqtrader.com/symboldirectory/otherlisted.txt" in text
+    assert "Incapsula" in text
     notice.write_text("고친 내용", encoding="utf-8")
     assert sd.ensure_notice(root) is False
     assert notice.read_text(encoding="utf-8") == "고친 내용"
     # 빌더 glob(*.txt)에 안 걸린다
     assert notice not in set(sd.symdir_dir(root).glob("*.txt"))
+
+
+# --- FTP 클라이언트 ---------------------------------------------------------
+
+
+class FakeFTP:
+    """``ftplib.FTP``를 대신한다. 연결 수와 호출 순서를 남긴다."""
+
+    instances: list[FakeFTP] = []
+    script: list[object] = []  # 연결마다 하나씩 꺼낸다: bytes면 성공, 예외면 retrbinary에서 던진다
+
+    def __init__(self, host, timeout=None):
+        self.host, self.timeout = host, timeout
+        self.log: list[str] = []
+        self.closed = False
+        FakeFTP.instances.append(self)
+
+    def login(self):
+        self.log.append("login")
+
+    def cwd(self, d):
+        self.log.append(f"cwd {d}")
+
+    def retrbinary(self, cmd, cb):
+        self.log.append(cmd)
+        item = FakeFTP.script.pop(0)
+        if isinstance(item, BaseException):
+            raise item
+        cb(item[:7])
+        cb(item[7:])
+
+    def quit(self):
+        self.closed = True
+
+    def close(self):
+        self.closed = True
+
+
+@pytest.fixture
+def fake_ftp():
+    FakeFTP.instances, FakeFTP.script = [], []
+    return FakeFTP
+
+
+def _ftp_client(**over) -> sd.SymdirClient:
+    kw = dict(interval_seconds=0, retry_wait_seconds=0, ftp_factory=FakeFTP)
+    kw.update(over)
+    return sd.SymdirClient(**kw)
+
+
+def test_ftp_returns_bytes_as_received(fake_ftp):
+    body = _body("otherlisted")
+    fake_ftp.script = [body]
+    c = _ftp_client()
+    assert c.get(sd.KINDS["otherlisted"][0]) == body
+    (f,) = fake_ftp.instances
+    assert f.host == "ftp.nasdaqtrader.com" and f.timeout == 60
+    assert f.log == ["login", "cwd symboldirectory", "RETR otherlisted.txt"]
+    assert f.closed and c.requests_made == 1
+
+
+def test_ftp_new_connection_per_kind(fake_ftp):
+    fake_ftp.script = [_body("nasdaqlisted"), _body("otherlisted")]
+    c = _ftp_client()
+    for kind in sd.KINDS:
+        c.get(sd.KINDS[kind][0])
+    assert len(fake_ftp.instances) == 2 and all(f.closed for f in fake_ftp.instances)
+    assert [f.log[-1] for f in fake_ftp.instances] == [
+        "RETR nasdaqlisted.txt",
+        "RETR otherlisted.txt",
+    ]
+
+
+@pytest.mark.parametrize("exc", [ftplib.error_temp("421 busy"), TimeoutError("t"), EOFError()])
+def test_ftp_transient_error_retries_then_succeeds(fake_ftp, exc):
+    body = _body("nasdaqlisted")
+    fake_ftp.script = [exc, body]
+    c = _ftp_client()
+    assert c.get(sd.KINDS["nasdaqlisted"][0]) == body
+    assert len(fake_ftp.instances) == 2 and c.requests_made == 2
+    assert all(f.closed for f in fake_ftp.instances)
+
+
+def test_ftp_transient_error_gives_up_after_retries(fake_ftp):
+    fake_ftp.script = [ftplib.error_temp("421")] * 3
+    c = _ftp_client()
+    with pytest.raises(sd.SymdirError):
+        c.get(sd.KINDS["nasdaqlisted"][0])
+    assert len(fake_ftp.instances) == 3
+
+
+def test_ftp_permanent_error_fails_immediately(fake_ftp):
+    fake_ftp.script = [ftplib.error_perm("550 no such file")]
+    c = _ftp_client()
+    with pytest.raises(sd.SymdirError, match="550"):
+        c.get(sd.KINDS["nasdaqlisted"][0])
+    assert len(fake_ftp.instances) == 1 and fake_ftp.instances[0].closed
 
 
 # --- us-daily 등록 -----------------------------------------------------------

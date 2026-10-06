@@ -13,28 +13,37 @@
 저장 이름은 ``<kind>_<UTC 받은 시각 YYYYMMDDHHMMSS>.txt``라 Wayback 원문과 같은
 ``ListingFile`` 규칙으로 읽힌다. 날짜 기록 파일(``LAST_FETCH.json``)과 ``NOTICE``는
 ``*.txt``가 아니라 빌더의 glob에 안 걸린다.
+
+**공식 FTP(``ftp://ftp.nasdaqtrader.com/symboldirectory/``)로 받는다 (2026-10-06).**
+웹 경로(HTTPS)는 같은 세션의 두 번째 요청이 Incapsula 봇 방어 HTML로 막혀 쓰지 않는다.
+세션을 새로 만들어 피하는 방식은 봇 방어를 우회하는 것이라 택하지 않았다. 사이트의
+심볼 디렉터리 안내 페이지가 가리키는 배포 경로가 FTP고, 크기·헤더·끝줄이 HTTPS 원문과
+같았다. 익명 로그인, 패시브 모드, kind마다 새 연결이다.
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import ftplib
 import hashlib
+import io
 import json
 import os
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
-import requests
-
 from collector.lake import DataRoot
-from collector.us.sources.nasdaq import BROWSER_USER_AGENT
 from collector.us.sources.wayback import WaybackParseError, parse_listing_file
 
-BASE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir"
+FTP_HOST = "ftp.nasdaqtrader.com"
+FTP_DIR = "symboldirectory"
+BASE_URL = f"ftp://{FTP_HOST}/{FTP_DIR}"
 
-#: kind -> (URL, 기대하는 첫 줄). 헤더가 다르면 형식이 바뀐 것이라 저장하지 않는다.
+#: kind -> (FTP 경로, 기대하는 첫 줄). 헤더가 다르면 형식이 바뀐 것이라 저장하지 않는다.
 KINDS: dict[str, tuple[str, str]] = {
     "nasdaqlisted": (
         f"{BASE_URL}/nasdaqlisted.txt",
@@ -63,8 +72,9 @@ LAST_FETCH_NAME = "LAST_FETCH.json"
 NOTICE_TEXT = """\
 nasdaqtrader 심볼 디렉터리 원문 보관본
 
-원천: https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt
-      https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt
+원천: ftp://ftp.nasdaqtrader.com/symboldirectory/nasdaqlisted.txt
+      ftp://ftp.nasdaqtrader.com/symboldirectory/otherlisted.txt
+2026-10-06부터 FTP로 받는다 (웹 경로는 Incapsula 봇 방어로 같은 세션 재요청이 막혀 쓰지 않는다).
 
 Copyright © 2021, The Nasdaq, Inc. All rights reserved.
 
@@ -83,11 +93,11 @@ class SymdirError(RuntimeError):
 
 @dataclass
 class SymdirClient:
-    user_agent: str = BROWSER_USER_AGENT
     interval_seconds: float = DEFAULT_INTERVAL_SECONDS
     retries: int = RETRIES
     retry_wait_seconds: float = RETRY_WAIT_SECONDS
-    session: requests.Session = field(default_factory=requests.Session)
+    timeout: float = 60.0
+    ftp_factory: Callable[..., ftplib.FTP] = ftplib.FTP
     _last: float = field(default=0.0, init=False, repr=False)
     requests_made: int = field(default=0, init=False)
 
@@ -96,28 +106,38 @@ class SymdirClient:
         if self._last and gap < seconds:
             time.sleep(seconds - gap)
 
+    def _retrieve(self, url: str) -> bytes:
+        """연결을 새로 열어 한 파일을 받고 닫는다. 익명 로그인, 패시브(기본)."""
+        parts = urlsplit(url)
+        directory, _, name = parts.path.strip("/").rpartition("/")
+        buf = io.BytesIO()
+        ftp = self.ftp_factory(parts.hostname or FTP_HOST, timeout=self.timeout)
+        try:
+            ftp.login()
+            if directory:
+                ftp.cwd(directory)
+            ftp.retrbinary(f"RETR {name}", buf.write)
+        finally:
+            try:
+                ftp.quit()
+            except (OSError, EOFError, ftplib.Error):
+                ftp.close()
+        return buf.getvalue()
+
     def get(self, url: str) -> bytes:
-        """**바이트를 그대로 돌려준다.** 5xx·네트워크 오류만 다시 시도한다."""
+        """**바이트를 그대로 돌려준다.** 4xx 응답·네트워크 오류만 다시 시도한다."""
         last_exc: Exception | None = None
         for attempt in range(max(1, self.retries)):
             self._wait(self.interval_seconds if attempt == 0 else self.retry_wait_seconds)
             try:
-                resp = self.session.get(
-                    url,
-                    headers={"User-Agent": self.user_agent, "Accept": "text/plain"},
-                    timeout=60,
-                )
-            except requests.RequestException as exc:
+                return self._retrieve(url)
+            except ftplib.error_perm as exc:  # 5xx는 다시 해도 같다
+                raise SymdirError(f"{url}: {exc}") from exc
+            except (ftplib.error_temp, OSError, EOFError) as exc:  # timeout은 OSError
                 last_exc = exc
-                continue
             finally:
                 self._last = time.monotonic()
                 self.requests_made += 1
-            if resp.status_code == 200:
-                return resp.content
-            last_exc = SymdirError(f"{resp.status_code} {url}")
-            if resp.status_code < 500:
-                break
         raise SymdirError(f"{url}: {last_exc}") from last_exc
 
 
