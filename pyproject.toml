@@ -52,6 +52,10 @@ line-length = 100
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+# pytest-xdist로 코어 수만큼 나눠 돌린다 (맥 14코어에서 unit 85.8초 → 25.5초, 2026-10-06).
+# DB를 쓰는 integration 시험은 tests/integration/conftest.py가 한 워커("db")에 묶는다 —
+# loadgroup이어야 그 묶음이 지켜진다. 시험 하나만 볼 때는 `-n0`을 붙이면 직렬로 돈다.
+addopts = "-n auto --dist loadgroup"
 
 [build-system]
 requires = ["hatchling"]
