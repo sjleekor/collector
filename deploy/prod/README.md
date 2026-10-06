@@ -2,16 +2,17 @@
 
 이 디렉터리는 `sj2-server:/home/whi/apps/sdc`에 배포되는 SDC 운영 파일의 source of truth다.
 
-- 마지막 확인: **2026-09-21 KST** (`us-derive` 추가 · v0.15.1)
+- 마지막 확인: **2026-10-07 KST** (v0.16.0 · 이미지 Python 3.14)
 - 확인한 원천: Cronicle API `GET /api/app/get_schedule/v1`, `GET /api/app/get_event/v1`, 원격 파일 `whi@sj2-server:/home/whi/apps/sdc/{compose.yaml,bin/}`
 - Cronicle UI: `http://sj2-server:3012/#Schedule`
 - 배포 경로: `whi@sj2-server:/home/whi/apps/sdc`
-- 현재 compose image: **`ghcr.io/sjleekor/collector:v0.15.1`** (2026-09-21 기준 원격과 이 저장소가 같다)
+- 현재 compose image: **`ghcr.io/sjleekor/collector:v0.16.0`** (2026-10-07 07:03 KST 배포 · Python 3.14.8 런타임)
 - 현재 상시 기동 서비스: `db`만 기동. `collector`는 Cronicle wrapper가 `docker compose run --rm collector ...`로 작업마다 실행한다.
 - **2026-09-21에 `us-derive.sh`를 더했다.** raw→derived를 굳히는 자리가 없었다 — 아래 이벤트 표의 `sdc_daily_us_derive` 행. **`v0.15.1`로 릴리즈·배포·Cronicle 등록까지 끝냈다.** 첫 실행에서 `prices_daily`가 2026-09-09 → **2026-09-18**로 따라잡았다 (+87,693행).
 - **2026-09-20부터 미국 수집도 여기서 돈다** (미국 계획 D18). 이벤트 `sdc_daily_us`, 래퍼 `bin/us-daily.sh`, 볼륨 `/home/whi/data/stock_data:/stock_data`.
   이미지에 **`dolt` 2.3.5**가 들어갔다 (1.32GB → 1.43GB) — 미국 가격·IV/HV 원천이다.
 - **`us-nasdaq-analyst.sh`를 더했다 (2026-09-24, `v0.15.11`).** Nasdaq 애널리스트 추정치(`analyst/{symbol}/earnings-forecast`) 주 1회 전진 축적 — 아래 "`sdc_daily_us_nasdaq_analyst`" 절 참고. **같은 날 `v0.15.11` 배포 뒤 Cronicle에 등록했다.**
+- **`v0.16.0`으로 이미지 런타임을 Python 3.14로 올렸다 (2026-10-07).** 최종 단계가 `python:3.14-slim-trixie`(3.14.8)이고, `UV_PYTHON_DOWNLOADS=never`·`UV_PYTHON=/usr/local/bin/python3`로 이미지 안 Python만 쓴다. 이미지 안 uv는 0.6.14 → 0.12.23이다. sj2가 2026-10-06 밤 Ubuntu 26.04로 올라가 serving venv(3.14.8)와 맞췄다. `src/`와 `deploy/prod/bin/`은 `v0.15.23`과 같다. CI는 3.12와 3.14에서 돈다.
 
 원격 `compose.yaml`과 `bin/*.sh` checksum은 현재 로컬 `deploy/prod`와 일치한다.
 

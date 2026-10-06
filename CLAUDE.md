@@ -9,8 +9,12 @@
 
 ## 현재 상태
 
-**한국·미국 수집 코드가 다 들어와 있다.** 버전 `0.15.0`.
-prod(sj2-server)가 `ghcr.io/sjleekor/collector:v0.15.0`으로 **두 시장 모두** 정기 수집을 돌린다.
+**한국·미국 수집 코드가 다 들어와 있다.** 버전 `0.16.0`.
+prod(sj2-server)가 `ghcr.io/sjleekor/collector:v0.16.0`(2026-10-07 배포)으로 **두 시장 모두** 정기 수집을 돌린다.
+
+이미지 런타임은 2026-10-07부터 Python 3.14(`python:3.14-slim-trixie`)다. sj2가 2026-10-06 Ubuntu 26.04로 올라가 serving venv(3.14.8)와 맞췄다.
+CI는 Python 3.12와 3.14에서 시험한다.
+`requires-python >=3.12`와 ruff/black `py312`는 그대로 둔다. `modeler`가 맥(Python 3.12.10)에서 collector를 editable 경로 패키지로 쓰기 때문이다.
 
 | | 언제 | Cronicle |
 |---|---|---|
