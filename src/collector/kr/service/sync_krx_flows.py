@@ -89,16 +89,19 @@ DISCONTINUED_FLOW_METRICS: dict[str, str] = {}
 #: Sessions between a metric's measurement date and the date its row can exist.
 #:
 #: KRX publishes the short-selling balance on measurement date + 2 business
-#: days, so on session T the newest balance row is measured at T-2 at best. A
-#: metric listed here is judged against ``budget + lag`` sessions instead of the
-#: budget alone, and is left out of its group's date (which would otherwise sit
-#: two sessions behind and fail the same-session budget every day).
+#: days, but often after the evening flow run (18:4x KST) picks it up, so the
+#: row lands one session later. A metric listed here is judged against
+#: ``budget + lag`` sessions instead of the budget alone, and is left out of its
+#: group's date (which would otherwise sit sessions behind and fail the
+#: same-session budget every day).
 #:
-#: Measured 2026-09-28 on production: 77% of rows arrive after 2 sessions, 19%
-#: after 3 (nearly every day in September). Override per run with
-#: ``--short-balance-publication-lag-sessions`` when the observed lag moves.
+#: 3, not 2 (decided 2026-10-07): from 2026-09-01 to 10-07 the newest balance at
+#: 23:00 was 2 sessions old on 8 trading days and 3 on 16, never 4 — a budget of
+#: 2 fails two days in three, 3 fails none. Our run start did not move
+#: (18:39-18:40 every month), so KRX publishes later than it used to. Override
+#: per run with ``--short-balance-publication-lag-sessions`` when this moves.
 METRIC_PUBLICATION_LAG_SESSIONS: dict[str, int] = {
-    SHORTING_BALANCE_METRIC: 2,
+    SHORTING_BALANCE_METRIC: 3,
 }
 
 

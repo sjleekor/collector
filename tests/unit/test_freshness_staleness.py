@@ -376,6 +376,7 @@ def _shorting_storage(balance: date) -> _FlowStorage:
 
 WEDNESDAY = date(2026, 8, 12)
 TUESDAY_BEFORE = date(2026, 8, 11)
+MONDAY_BEFORE = date(2026, 8, 10)
 
 
 def test_the_short_balance_is_collected_and_gated_not_discontinued() -> None:
@@ -383,7 +384,7 @@ def test_the_short_balance_is_collected_and_gated_not_discontinued() -> None:
     # sit in the discontinued list, which turns its gate off.
     assert SHORTING_BALANCE_METRIC not in DISCONTINUED_FLOW_METRICS
     assert SHORTING_BALANCE_METRIC in active_flow_metrics("shorting")
-    assert METRIC_PUBLICATION_LAG_SESSIONS[SHORTING_BALANCE_METRIC] == 2
+    assert METRIC_PUBLICATION_LAG_SESSIONS[SHORTING_BALANCE_METRIC] == 3
 
 
 def test_the_balance_is_left_out_of_the_group_date() -> None:
@@ -396,27 +397,36 @@ def test_the_balance_is_left_out_of_the_group_date() -> None:
 
 
 def test_a_balance_two_sessions_behind_is_current() -> None:
-    # Friday evening: the newest publishable measurement date is Wednesday
-    # (Fri is session 0, Thu 1, Wed 2). max_lag 1 + publication lag 2 = 3rd
-    # newest session.
+    # Friday evening (Fri is session 0, Thu 1, Wed 2, Tue 3).
     report = build_freshness_report(_shorting_storage(balance=WEDNESDAY))
 
     assert _evaluate(report) == []
 
 
-def test_a_balance_three_sessions_behind_is_stale_at_the_default_lag() -> None:
-    # The case production hit on about 19% of days (nearly every day in
-    # September 2026): the row for Wednesday arrives a session late. The
-    # default budget reports it; the CLI flag widens it.
+def test_a_balance_three_sessions_behind_is_current_at_the_default_lag() -> None:
+    # The usual case since September 2026 (16 of 24 trading days): KRX posts
+    # after the evening run, so the row lands a session late. max_lag 1 +
+    # publication lag 3 = 4th newest session, Tuesday.
     report = build_freshness_report(_shorting_storage(balance=TUESDAY_BEFORE))
+
+    assert _evaluate(report) == []
+
+    narrowed = _evaluate(report, metric_publication_lag_sessions={SHORTING_BALANCE_METRIC: 2})
+    assert [finding.domain for finding in narrowed] == [
+        f"krx_security_flow_raw:{SHORTING_BALANCE_METRIC}"
+    ]
+    assert narrowed[0].required_at_or_after == WEDNESDAY
+
+
+def test_a_balance_four_sessions_behind_is_stale_at_the_default_lag() -> None:
+    report = build_freshness_report(_shorting_storage(balance=MONDAY_BEFORE))
 
     findings = _evaluate(report)
 
     assert [finding.domain for finding in findings] == [
         f"krx_security_flow_raw:{SHORTING_BALANCE_METRIC}"
     ]
-    assert findings[0].required_at_or_after == WEDNESDAY
-    assert _evaluate(report, metric_publication_lag_sessions={SHORTING_BALANCE_METRIC: 3}) == []
+    assert findings[0].required_at_or_after == TUESDAY_BEFORE
 
 
 def test_a_frozen_balance_now_fires_the_gate() -> None:

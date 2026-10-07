@@ -191,24 +191,23 @@ def _flow_storage(balance: date) -> FakeStorage:
 
 
 def test_balance_is_judged_by_publication_lag_not_by_k() -> None:
-    # K = Thu 10-01; two sessions back is Tue 09-29. A balance measured then
-    # is the newest one KRX can have published.
+    # K = Thu 10-01; three sessions back (the default lag) is Mon 09-28.
     cfg = _cfg(holidays=frozenset())
-    doc = er.evaluate_export_readiness(_flow_storage(date(2026, 9, 29)), cfg)
+    doc = er.evaluate_export_readiness(_flow_storage(date(2026, 9, 28)), cfg)
     flows = _check(doc, "flows")
     assert flows["status"] == "ok"
     assert flows["metrics"]["short_selling_balance_quantity"]["required_at_or_after"] == (
-        "2026-09-29"
+        "2026-09-28"
     )
 
-    late = er.evaluate_export_readiness(_flow_storage(date(2026, 9, 28)), cfg)
+    late = er.evaluate_export_readiness(_flow_storage(date(2026, 9, 25)), cfg)
     assert _check(late, "flows")["status"] == "not_yet"
     assert any("short_selling_balance_quantity" in r for r in late["reasons"])
 
-    widened = _cfg(holidays=frozenset(), short_balance_publication_lag_sessions=3)
-    assert er.evaluate_export_readiness(_flow_storage(date(2026, 9, 28)), widened)["verdict"] == (
-        "ready"
-    )
+    narrowed = _cfg(holidays=frozenset(), short_balance_publication_lag_sessions=2)
+    assert _check(
+        er.evaluate_export_readiness(_flow_storage(date(2026, 9, 28)), narrowed), "flows"
+    )["status"] == "not_yet"
 
 
 def test_missing_run_record_not_yet() -> None:

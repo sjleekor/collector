@@ -534,7 +534,11 @@ def _handle_ops_freshness_report(args: argparse.Namespace) -> None:
         max_lag_calendar_days=args.max_lag_calendar_days,
         metric_publication_lag_sessions={
             **METRIC_PUBLICATION_LAG_SESSIONS,
-            SHORTING_BALANCE_METRIC: args.short_balance_publication_lag_sessions,
+            **(
+                {}
+                if args.short_balance_publication_lag_sessions is None
+                else {SHORTING_BALANCE_METRIC: args.short_balance_publication_lag_sessions}
+            ),
         },
     )
     if not findings:
@@ -593,7 +597,15 @@ def _handle_ops_kr_export_readiness(args: argparse.Namespace) -> None:
         as_of=as_of,
         min_ticker_ratio=args.min_ticker_ratio,
         flow_max_lag_trading_days=args.flow_max_lag_trading_days,
-        short_balance_publication_lag_sessions=args.short_balance_publication_lag_sessions,
+        **(
+            {}
+            if args.short_balance_publication_lag_sessions is None
+            else {
+                "short_balance_publication_lag_sessions": (
+                    args.short_balance_publication_lag_sessions
+                )
+            }
+        ),
         required_run_types=required,
         run_since_overrides=tuple(overrides),
     )
@@ -3103,11 +3115,11 @@ def build_parser() -> argparse.ArgumentParser:
     ops_freshness.add_argument(
         "--short-balance-publication-lag-sessions",
         type=int,
-        default=2,
+        default=None,
         help=(
             "Sessions KRX needs to publish the short-selling balance after its "
             "measurement date; the balance is judged against --max-lag-trading-days "
-            "plus this (default: 2; production showed 3 on about 19% of days)."
+            "plus this (default: 3, METRIC_PUBLICATION_LAG_SESSIONS)."
         ),
     )
     ops_freshness.add_argument(
@@ -3167,11 +3179,11 @@ def build_parser() -> argparse.ArgumentParser:
     ops_readiness.add_argument(
         "--short-balance-publication-lag-sessions",
         type=int,
-        default=2,
+        default=None,
         help=(
             "Sessions KRX needs to publish the short-selling balance after its "
             "measurement date; the balance must reach K minus (flow lag + this) "
-            "(default: 2; production showed 3 on about 19% of days)."
+            "(default: 3, METRIC_PUBLICATION_LAG_SESSIONS)."
         ),
     )
     ops_readiness.add_argument(

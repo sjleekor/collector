@@ -236,7 +236,7 @@ def evaluate_staleness(
 
     ``metric_publication_lag_sessions`` maps a flow metric to the sessions its
     source needs to publish it (default
-    :data:`METRIC_PUBLICATION_LAG_SESSIONS`; the short-selling balance is 2).
+    :data:`METRIC_PUBLICATION_LAG_SESSIONS`; the short-selling balance is 3).
     Such a metric is checked on its own against ``max_lag_trading_days + lag``
     sessions, and only when its group is in the report. At the default lag a
     day on which KRX publishes the balance one session late (3 sessions after
