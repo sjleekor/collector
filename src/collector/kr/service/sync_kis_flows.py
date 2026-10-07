@@ -22,6 +22,7 @@ range``. Everything downstream of that difference has to change:
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import time
 from dataclasses import dataclass, field
@@ -40,6 +41,7 @@ from collector.kr.domain.models import (
     KrxFlowPhaseCounts,
     SecurityFlowFetchResult,
     Stock,
+    StockStatusRecord,
     UpsertResult,
 )
 from collector.kr.infra.calendar.trading_days import get_trading_days
@@ -98,6 +100,7 @@ DEFAULT_RETRY_MAX_ATTEMPTS = 3
 DEFAULT_GUARD_BACKOFF_SECONDS = 1.0
 DEFAULT_PROGRESS_LOG_EVERY_ITEMS = 200
 DEFAULT_PROGRESS_LOG_INTERVAL_SECONDS = 30.0
+DEFAULT_STATUS_FLUSH_EVERY = 100
 # Above the whole universe times every group, so in practice nothing is cut.
 # The truncation count is recorded anyway — a silently shortened list reads as
 # "that is all of them".
@@ -128,6 +131,17 @@ class KisFlowSyncResult:
     errors: dict[str, str] = field(default_factory=dict)
     http_counts: dict[str, int] = field(default_factory=dict)
     aborted_reason: str | None = None
+    #: Status flags (``kis_stock_status_daily``) taken from the same
+    #: ``inquire-price`` responses as foreign holding. Kept apart from
+    #: ``errors``: a flag problem must not read as a flow problem, and the CLI
+    #: decides the exit code for it separately.
+    status_capture: bool = False
+    status_attempted: int = 0
+    status_rows_inserted: int = 0
+    status_errors: dict[str, str] = field(default_factory=dict)
+    status_flagged_managed: int = 0
+    status_flagged_temp_stop: int = 0
+    status_flagged_market_warning: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -365,8 +379,19 @@ def sync_kis_security_flows(
     progress_log_every_items: int = DEFAULT_PROGRESS_LOG_EVERY_ITEMS,
     progress_log_interval_seconds: float = DEFAULT_PROGRESS_LOG_INTERVAL_SECONDS,
     run_params_extra: dict[str, object] | None = None,
+    capture_status: bool = False,
+    status_flush_every: int = DEFAULT_STATUS_FLUSH_EVERY,
 ) -> KisFlowSyncResult:
-    """Synchronise investor/short-selling/foreign-holding raw rows from KIS."""
+    """Synchronise investor/short-selling/foreign-holding raw rows from KIS.
+
+    With ``capture_status`` the foreign-holding requests also deliver the status
+    flags, which are stored in ``kis_stock_status_daily``. The provider must
+    have been built with a snapshot date for that; the flags come out of the
+    same response, so the request count does not change. A failure to parse or
+    store flags never stops the flow collection: it is recorded
+    (``status_errors``, ``params.status_failed_request_keys``, run ``partial``)
+    and the caller turns it into an exit code.
+    """
     provider_source = provider.source()
     supported_groups = set(provider.supported_flow_groups())
     enabled_groups = sorted(set(enabled_flow_groups or supported_groups) & supported_groups)
@@ -391,6 +416,7 @@ def sync_kis_security_flows(
         "no_data_ttl_days": no_data_ttl_days,
         "retry_max_attempts": retry_max_attempts,
         "cursor_sources": [source.value for source in FLOW_CURSOR_SOURCES],
+        "capture_status": capture_status,
     }
     if run_params_extra:
         run_params.update(run_params_extra)
@@ -403,7 +429,10 @@ def sync_kis_security_flows(
     )
     storage.record_run(run)
 
-    result = KisFlowSyncResult(pending_metrics=provider.unsupported_metric_codes())
+    result = KisFlowSyncResult(
+        pending_metrics=provider.unsupported_metric_codes(),
+        status_capture=capture_status,
+    )
     for group in enabled_groups:
         result.phase_counts[group] = KrxFlowPhaseCounts()
 
@@ -418,6 +447,42 @@ def sync_kis_security_flows(
     # matters, and a checkpoint that only survives success is not a checkpoint.
     no_data_keys_seen: set[str] = set()
     failed_keys: list[str] = []
+    status_pending: list[StockStatusRecord] = []
+
+    def flush_status() -> None:
+        if not status_pending:
+            return
+        batch = list(status_pending)
+        status_pending.clear()
+        try:
+            upsert = storage.upsert_kis_stock_status(batch)
+        except Exception as exc:
+            # The flow rows are already stored; losing a batch of flags is
+            # recoverable (sync-kis-status refills today's holes), so record
+            # which tickers and carry on.
+            logger.exception("Could not store %d KIS status rows", len(batch))
+            for record in batch:
+                result.status_errors[record.ticker] = f"store failed: {exc}"
+            return
+        result.status_rows_inserted += upsert.inserted
+
+    def take_status(item: KisFlowWorkItem, fetch_result: SecurityFlowFetchResult) -> None:
+        if not capture_status or item.group != FOREIGN_HOLDING_GROUP:
+            return
+        result.status_attempted += 1
+        if fetch_result.status_error:
+            result.status_errors[item.ticker] = fetch_result.status_error
+        elif fetch_result.status_record is None and fetch_result.error:
+            # The request itself failed, so there was no response to read flags from.
+            result.status_errors[item.ticker] = f"no response: {fetch_result.error}"
+        if fetch_result.status_record is not None:
+            record = dataclasses.replace(fetch_result.status_record, run_id=run.run_id)
+            status_pending.append(record)
+            result.status_flagged_managed += record.mang_issu_cls_code == "Y"
+            result.status_flagged_temp_stop += record.temp_stop_yn == "Y"
+            result.status_flagged_market_warning += record.mrkt_warn_cls_code not in ("", "00")
+            if status_flush_every > 0 and len(status_pending) >= status_flush_every:
+                flush_status()
 
     try:
         targets = load_kis_flow_targets(storage, tickers, scope)
@@ -476,6 +541,8 @@ def sync_kis_security_flows(
                 logger_instance=logger,
             )
 
+            take_status(item, fetch_result)
+
             if fetch_result.error:
                 logger.warning(
                     "KIS flow fetch failed for %s: %s", item.request_key, fetch_result.error
@@ -525,8 +592,10 @@ def sync_kis_security_flows(
                 last_log_at = now
                 last_log_processed = processed
 
+        flush_status()
         result.http_counts = provider.request_stats().as_counts()
         _record_checkpoint(run, no_data_keys=no_data_keys_seen, failed_keys=failed_keys)
+        _record_status_checkpoint(run, result)
 
         complete_run(
             storage,
@@ -539,14 +608,21 @@ def sync_kis_security_flows(
                 no_data_requests=result.no_data_requests,
                 pending_metric_count=len(result.pending_metrics),
                 **_flatten_phase_counts(result.phase_counts, enabled_groups),
+                **_status_counts(result),
                 **result.http_counts,
             ),
-            errors=result.errors,
+            # Flag problems make the run ``partial`` but stay out of
+            # ``result.errors``, which describes the flow requests.
+            errors={
+                **result.errors,
+                **{f"status:{ticker}": error for ticker, error in result.status_errors.items()},
+            },
             partial_subject="KIS flow requests",
         )
         return result
     except (SourceAuthError, SourceQuotaExhaustedError, SourceBlockedError) as exc:
         # Not a per-item error: every remaining item would fail the same way.
+        _flush_status_on_abort(flush_status)
         result.http_counts = _safe_http_counts(provider)
         result.aborted_reason = type(exc).__name__
         run.counts = build_run_counts(
@@ -555,18 +631,22 @@ def sync_kis_security_flows(
             requests_skipped=result.requests_skipped,
             rows_upserted=result.rows_upserted,
             no_data_requests=result.no_data_requests,
+            **_status_counts(result),
             **result.http_counts,
         )
         run.params["aborted_reason"] = result.aborted_reason
         _record_checkpoint(run, no_data_keys=no_data_keys_seen, failed_keys=failed_keys)
+        _record_status_checkpoint(run, result)
         logger.error("KIS flow sync aborted (%s): %s", result.aborted_reason, exc)
         fail_run(storage, run, exc)
         result.errors["pipeline"] = str(exc)
         return result
     except Exception as exc:
         logger.exception("KIS flow sync failed")
+        _flush_status_on_abort(flush_status)
         result.http_counts = _safe_http_counts(provider)
         _record_checkpoint(run, no_data_keys=no_data_keys_seen, failed_keys=failed_keys)
+        _record_status_checkpoint(run, result)
         fail_run(storage, run, exc)
         result.errors["pipeline"] = str(exc)
         return result
@@ -591,6 +671,37 @@ def _record_checkpoint(
         dropped = max(0, len(ordered) - MAX_CHECKPOINT_KEYS)
         if dropped:
             run.params["failed_request_keys_truncated"] = dropped
+
+
+def _status_counts(result: KisFlowSyncResult) -> dict[str, int]:
+    if not result.status_capture:
+        return {}
+    return {
+        "status_attempted": result.status_attempted,
+        "status_rows_inserted": result.status_rows_inserted,
+        "status_error_count": len(result.status_errors),
+        "status_flagged_managed": result.status_flagged_managed,
+        "status_flagged_temp_stop": result.status_flagged_temp_stop,
+        "status_flagged_market_warning": result.status_flagged_market_warning,
+    }
+
+
+def _record_status_checkpoint(run: IngestionRun, result: KisFlowSyncResult) -> None:
+    """Persist which tickers have no status row from this run (refill with sync-kis-status)."""
+    if not result.status_errors:
+        return
+    ordered = sorted(result.status_errors)
+    run.params["status_failed_request_keys"] = ordered[:MAX_CHECKPOINT_KEYS]
+    dropped = max(0, len(ordered) - MAX_CHECKPOINT_KEYS)
+    if dropped:
+        run.params["status_failed_request_keys_truncated"] = dropped
+
+
+def _flush_status_on_abort(flush_status) -> None:
+    try:
+        flush_status()
+    except Exception:  # pragma: no cover - never mask the real error
+        logger.exception("Could not flush pending status rows while aborting")
 
 
 def build_kis_flow_plan(

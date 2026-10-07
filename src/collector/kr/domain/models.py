@@ -971,6 +971,49 @@ class SecurityFlowFetchResult:
     records: list[SecurityFlowLine] = field(default_factory=list)
     no_data: bool = False
     error: str | None = None
+    #: KIS ``inquire-price`` answers foreign holding and the status flags in one
+    #: response. A provider that was given a snapshot date parses the flags from
+    #: the same response (no extra request) and hands them back here. They are
+    #: independent of ``error``: a bad foreign-holding field must not lose the
+    #: flags, and a bad flag field must not lose the foreign holding.
+    status_record: StockStatusRecord | None = None
+    status_error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class StockStatusRecord:
+    """One ticker's KIS status flags as observed on ``snapshot_date``.
+
+    The flags are a *current* value: ``inquire-price`` has no business date and
+    no history, so the only honest key is the day we asked.  ``observed_at`` is
+    when the response was read, which can be later than the session it
+    describes.  Flags are kept as the raw KIS codes (``Y``/``N``, ``00``..) and
+    never interpreted here.
+    """
+
+    snapshot_date: date
+    ticker: str
+    market: Market
+    mang_issu_cls_code: str
+    temp_stop_yn: str
+    mrkt_warn_cls_code: str
+    observed_at: datetime
+    invt_caful_yn: str | None = None
+    short_over_yn: str | None = None
+    sltr_yn: str | None = None
+    iscd_stat_cls_code: str | None = None
+    source: Source = Source.KIS
+    run_id: str | None = None
+    raw_payload: Mapping[str, object] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class StockStatusFetchResult:
+    """Result of fetching one ticker's status flags."""
+
+    record: StockStatusRecord | None = None
+    no_data: bool = False
+    error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

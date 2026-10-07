@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from datetime import date, timedelta
+from typing import Any
 
 from collector.kr.adapters.flows_kis.parsers import (
     DAILY_SHORT_SALE_PAGE_ROWS,
@@ -22,7 +24,12 @@ from collector.kr.adapters.flows_kis.parsers import (
 )
 from collector.kr.adapters.kis_common.client import KisClient
 from collector.kr.domain.enums import Market, Source
-from collector.kr.domain.models import FlowRequestStats, SecurityFlowFetchResult, SecurityFlowLine
+from collector.kr.domain.models import (
+    FlowRequestStats,
+    SecurityFlowFetchResult,
+    SecurityFlowLine,
+    StockStatusRecord,
+)
 from collector.kr.util.pipeline import SourceAuthError, SourceQuotaExhaustedError
 
 logger = logging.getLogger(__name__)
@@ -44,8 +51,12 @@ MAX_PAGES_PER_REQUEST = 200
 class KisFlowProvider:
     """Fetch security-flow metrics from KIS domestic-stock quotation APIs."""
 
-    def __init__(self, *, client: KisClient) -> None:
+    def __init__(self, *, client: KisClient, status_snapshot_date: date | None = None) -> None:
         self._client = client
+        # When set, ``fetch_foreign_holding`` also parses the status flags
+        # (관리종목·거래정지·시장경보) out of the same ``inquire-price`` response and
+        # files them under this date. No extra request is made.
+        self._status_snapshot_date = status_snapshot_date
 
     def source(self) -> Source:
         return Source.KIS
@@ -91,19 +102,57 @@ class KisFlowProvider:
             rows = response.rows("output")
             if not rows:
                 return SecurityFlowFetchResult(no_data=True)
-            records = parse_foreign_holding_row(
-                rows[0],
-                ticker=ticker,
-                market=market,
-                trade_date=trade_date,
-                request=params,
+            status_record, status_error = self._parse_status(rows[0], ticker, market)
+            try:
+                records = parse_foreign_holding_row(
+                    rows[0],
+                    ticker=ticker,
+                    market=market,
+                    trade_date=trade_date,
+                    request=params,
+                )
+            except Exception as exc:
+                logger.warning("KIS foreign holding parse failed for %s: %s", ticker, exc)
+                return SecurityFlowFetchResult(
+                    error=str(exc),
+                    status_record=status_record,
+                    status_error=status_error,
+                )
+            return SecurityFlowFetchResult(
+                records=records,
+                no_data=not records,
+                status_record=status_record,
+                status_error=status_error,
             )
-            return SecurityFlowFetchResult(records=records, no_data=not records)
         except (SourceAuthError, SourceQuotaExhaustedError):
             raise
         except Exception as exc:
             logger.warning("KIS foreign holding fetch failed for %s: %s", ticker, exc)
             return SecurityFlowFetchResult(error=str(exc))
+
+    def _parse_status(
+        self,
+        row: Mapping[str, Any],
+        ticker: str,
+        market: Market,
+    ) -> tuple[StockStatusRecord | None, str | None]:
+        if self._status_snapshot_date is None:
+            return None, None
+        # Imported here: kis_stock_status imports this package's parsers, so a
+        # top-level import would be circular.
+        from collector.kr.adapters.kis_stock_status import parse_stock_status_row
+
+        try:
+            record = parse_stock_status_row(
+                row,
+                ticker=ticker,
+                market=market,
+                snapshot_date=self._status_snapshot_date,
+            )
+        except Exception as exc:
+            logger.warning("KIS stock status parse failed for %s: %s", ticker, exc)
+            return None, str(exc)
+        return record, None
 
     def fetch_investor_net_volume(
         self,
