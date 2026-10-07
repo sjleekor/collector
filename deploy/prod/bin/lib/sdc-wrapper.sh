@@ -51,14 +51,34 @@ sdc_reap_orphan_container() {
   fi
 }
 
+# 중단 신호를 컨테이너까지 전한다 (2026-10-07).
+# Cronicle은 자식 pid 하나에 TERM을 보내고 child_kill_timeout(10초) 뒤 KILL을 보낸다.
+# 예전에는 `docker compose run`을 포그라운드로 불러서, bash가 그 명령이 끝날 때까지
+# trap을 실행하지 못했다 — 신호가 와도 컨테이너는 그대로 돌았다. 지금은 백그라운드로
+# 띄우고 `wait`한다. `wait`는 trap된 신호에 바로 깨어나므로 handler가 바로 돈다.
+# 정지에 쓸 수 있는 시간은 10초 안이어야 하므로 기본 5초(SDC_STOP_GRACE_SECONDS)를 준다.
+# compose.yaml의 stop_grace_period와 같은 값이다.
+SDC_STOP_GRACE_SECONDS="${SDC_STOP_GRACE_SECONDS:-5}"
+
+# TERM/INT handler. 컨테이너를 이름으로 정지하고, 정지가 안 되면 강제로 지운다.
+# `docker compose run`(백그라운드)에는 TERM을 보내 compose가 정리하게 한다.
+_sdc_on_stop_signal() {
+  local sig="$1"
+  _sdc_signal_received="$sig"
+  sdc_log "signal ${sig} received; stopping ${SDC_RUN_CONTAINER_NAME:-compose run}"
+  if [[ -n "${SDC_RUN_CONTAINER_NAME:-}" ]]; then
+    docker stop -t "$SDC_STOP_GRACE_SECONDS" "$SDC_RUN_CONTAINER_NAME" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${_sdc_run_pid:-}" ]]; then
+    kill -TERM "$_sdc_run_pid" 2>/dev/null || true
+  fi
+}
+
 sdc_run_collector() {
   sdc_cd_app
   local -a name_args=()
   if [[ -n "${SDC_RUN_CONTAINER_NAME:-}" ]]; then
     name_args=(--name "$SDC_RUN_CONTAINER_NAME")
-    # Covers a graceful abort (Cronicle sends TERM). A SIGKILL cannot be
-    # trapped, which is why the reap above exists as well.
-    trap 'sdc_log "signal received; stopping ${SDC_RUN_CONTAINER_NAME}"; docker rm -f "${SDC_RUN_CONTAINER_NAME}" >/dev/null 2>&1 || true' INT TERM
   fi
   # Optional: run something other than the `collector` entrypoint (the KR raw
   # export runs bin/raw-parquet-export-all.sh), and pass extra `run` options
@@ -71,7 +91,38 @@ sdc_run_collector() {
     read -r -a extra_args <<< "$SDC_RUN_EXTRA_ARGS"
   fi
   sdc_log "run: $SDC_DOCKER_COMPOSE_CMD run --rm ${name_args[*]} ${entry_args[*]} ${extra_args[*]} $SDC_COLLECTOR_SERVICE $*"
-  sdc_compose run --rm "${name_args[@]}" "${entry_args[@]}" "${extra_args[@]}" "$SDC_COLLECTOR_SERVICE" "$@"
+
+  _sdc_signal_received=""
+  _sdc_run_pid=""
+  trap '_sdc_on_stop_signal TERM' TERM
+  trap '_sdc_on_stop_signal INT' INT
+  # 백그라운드 명령은 비대화 셸에서 stdin이 /dev/null이 되므로 `<&0`으로 그대로 잇는다.
+  sdc_compose run --rm "${name_args[@]}" "${entry_args[@]}" "${extra_args[@]}" "$SDC_COLLECTOR_SERVICE" "$@" <&0 &
+  _sdc_run_pid=$!
+
+  local rc=0
+  wait "$_sdc_run_pid" || rc=$?
+  if [[ -n "$_sdc_signal_received" ]]; then
+    # wait가 신호로 깨어났다. docker stop이 이미 유예를 다 썼으므로 compose가 끝나기를 2초만 더 본다
+    # (최악 5+2초 + rm으로 Cronicle의 10초 안에 든다).
+    local i=0
+    while kill -0 "$_sdc_run_pid" 2>/dev/null && (( i < 4 )); do
+      sleep 0.5 || true
+      i=$((i + 1))
+    done
+    if kill -0 "$_sdc_run_pid" 2>/dev/null; then
+      kill -KILL "$_sdc_run_pid" 2>/dev/null || true
+    fi
+    wait "$_sdc_run_pid" 2>/dev/null || true
+    if [[ -n "${SDC_RUN_CONTAINER_NAME:-}" ]]; then
+      docker rm -f "$SDC_RUN_CONTAINER_NAME" >/dev/null 2>&1 || true
+    fi
+    # 관례대로 128+신호 번호. 컨테이너가 정지되며 낸 코드가 아니라 중단이었음을 알린다.
+    if [[ "$_sdc_signal_received" == "INT" ]]; then rc=130; else rc=143; fi
+  fi
+  trap - INT TERM
+  _sdc_run_pid=""
+  return "$rc"
 }
 
 # 컨테이너는 기본이 root라 호스트에 마운트한 경로에 root 소유 파일을 남긴다
