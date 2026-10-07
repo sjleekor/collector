@@ -22,6 +22,11 @@ Holiday CSV format (``data/holidays_krx.csv``)::
     2024-01-01,New Year
     2024-02-09,Lunar New Year
     ...
+
+The 2027 rows were derived from the statutory holiday rules and cross-checked
+against ``exchange_calendars`` XKRX (2026-10-07) before KRX published its 2027
+market calendar.  They are provisional: compare again once the notice is out
+(December) and fix any difference here.
 """
 
 from __future__ import annotations

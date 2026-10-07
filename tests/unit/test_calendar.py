@@ -83,3 +83,26 @@ class TestGetTradingDays:
         holidays: set[date] = set()
         result = get_trading_days(date(2024, 1, 5), date(2024, 1, 1), holidays=holidays)
         assert result == []
+
+
+class TestHolidays2027:
+    """2027 rows of the packaged CSV (provisional until KRX publishes the 2027 notice)."""
+
+    def test_2027_weekday_closures(self) -> None:
+        holidays = {d for d in load_holidays() if d.year == 2027 and d.weekday() < 5}
+        assert holidays == {
+            date(2027, 1, 1), date(2027, 2, 8), date(2027, 2, 9), date(2027, 3, 1),
+            date(2027, 5, 5), date(2027, 5, 13), date(2027, 8, 16), date(2027, 9, 14),
+            date(2027, 9, 15), date(2027, 9, 16), date(2027, 10, 4), date(2027, 10, 11),
+            date(2027, 12, 27), date(2027, 12, 31),
+        }
+
+    def test_2027_matches_xkrx(self) -> None:
+        import pytest
+
+        xcals = pytest.importorskip("exchange_calendars")
+        cal = xcals.get_calendar("XKRX", start="2027-01-01", end="2027-12-31")
+        holidays = load_holidays()
+        ours = get_trading_days(date(2027, 1, 4), date(2027, 12, 30), holidays=holidays)
+        theirs = [s.date() for s in cal.sessions_in_range("2027-01-04", "2027-12-30")]
+        assert ours == theirs
