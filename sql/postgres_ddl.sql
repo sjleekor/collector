@@ -807,6 +807,44 @@ CREATE INDEX IF NOT EXISTS ix_krx_security_flow_raw_lookup
 CREATE INDEX IF NOT EXISTS ix_krx_security_flow_raw_sync_cursor
     ON krx_security_flow_raw (fetched_at, raw_id);
 
+-- 16b) kis_stock_status_daily ─ KIS inquire-price status flags, one snapshot per day
+--
+-- inquire-price (FHKST01010100) reports a ticker's *current* status — 관리종목,
+-- 거래정지, 시장경보 — with no business date and no history, so the history is
+-- whatever we record by asking every day. It starts the day the job starts;
+-- nothing reconstructs the past (DART exchange disclosures `pblntf_ty=I` carry
+-- the dated history, see my/milestones/kr/modeling/plan/20260927_october_plan).
+--
+-- snapshot_date is the KST date we asked, not a session date; observed_at is the
+-- exact read time. One row per (snapshot_date, ticker): re-running a day fills
+-- the holes and never rewrites an existing row (ON CONFLICT DO NOTHING).
+-- Codes are the raw KIS values: mang_issu_cls_code / temp_stop_yn Y|N,
+-- mrkt_warn_cls_code 00 (none) | 01 주의 | 02 경고 | 03 위험.
+-- run_id is advisory, not a foreign key (ingestion_runs is not mirrored).
+CREATE TABLE IF NOT EXISTS kis_stock_status_daily (
+    snapshot_date       DATE        NOT NULL,
+    ticker              TEXT        NOT NULL,
+    market              TEXT        NOT NULL,
+    mang_issu_cls_code  TEXT        NOT NULL,
+    temp_stop_yn        TEXT        NOT NULL,
+    mrkt_warn_cls_code  TEXT        NOT NULL,
+    invt_caful_yn       TEXT,
+    short_over_yn       TEXT,
+    sltr_yn             TEXT,
+    iscd_stat_cls_code  TEXT,
+    observed_at         TIMESTAMPTZ NOT NULL,
+    source              TEXT        NOT NULL DEFAULT 'KIS',
+    run_id              UUID,
+    raw_payload         JSONB       NOT NULL,
+    PRIMARY KEY (snapshot_date, ticker)
+);
+
+CREATE INDEX IF NOT EXISTS ix_kis_stock_status_daily_ticker
+    ON kis_stock_status_daily (ticker, snapshot_date DESC);
+
+CREATE INDEX IF NOT EXISTS ix_kis_stock_status_daily_sync_cursor
+    ON kis_stock_status_daily (observed_at, ticker);
+
 -- 19) common_feature_series ─ source series catalog and collection policy
 CREATE TABLE IF NOT EXISTS common_feature_series (
     series_id               TEXT        PRIMARY KEY,

@@ -114,6 +114,7 @@ flowchart TD
 | `sdc_daily_ecos_common_daily` | Mon-Fri 20:30 | `sdc_daily_ecos_common_macro` | `common-sync-ecos-daily.sh` | ECOS 일간 common feature raw series를 증분 동기화한다. |
 | `sdc_daily_ecos_common_macro` | chain-only | 없음 | `common-sync-ecos-macro.sh` | ECOS 월간 macro series(`macro_cpi`, `macro_ppi`, `macro_m2`, `macro_consumer_sentiment`)를 긴 lookback으로 동기화한다. |
 | `sdc_kis_flows_weekly` | Monday 20:30 | 없음 | `flows-sync-kis.sh` | KIS investor/shorting 지표를 주 1회 동기화한다. |
+| `sdc_kis_status_daily` | Mon-Fri 22:15 (**예정**) | 없음 | `flows-sync-kis-status.sh` | KIS `inquire-price`의 관리종목·거래정지·시장경보 플래그를 전 종목 일간 스냅샷(`kis_stock_status_daily`)으로 쌓는다. 종목당 1요청, 약 47분. `kis` 락을 `sdc_kis_flows_*`와 같이 쓰므로 직렬로 돈다. 다시 돌리면 빠진 종목만 받는다. 배포 전에 `db init`(또는 `sql/migrations/20261008_*`)로 테이블을 만든다. Cronicle 등록은 별도로 한다. |
 | `sdc_daily_freshness` | daily 23:00 | 없음 | `ops-freshness-report.sh` | 저녁 수집이 끝난 뒤 raw 최신일을 검사하고 stale이면 실패한다. |
 | `sdc_daily_opendart_corp` | daily 04:00 | `sdc_daily_opendart_financials` | `dart-sync-corp.sh` | OpenDART corp master를 동기화한다. |
 | `sdc_daily_opendart_financials` | chain-only | `sdc_daily_opendart_share_info` | `dart-sync-financials.sh` | OpenDART 재무제표를 증분 동기화한다. 기본 lookback은 1년, attempt guard는 10,000건이다. |

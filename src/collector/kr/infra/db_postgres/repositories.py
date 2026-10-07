@@ -50,6 +50,7 @@ from collector.kr.domain.models import (
     SecurityFlowLine,
     Stock,
     StockMetricFact,
+    StockStatusRecord,
     StockUniverseSnapshot,
     UpsertResult,
 )
@@ -1881,6 +1882,67 @@ class PostgresStorage:
                 )
 
         return result
+
+    def upsert_kis_stock_status(
+        self,
+        records: list[StockStatusRecord],
+    ) -> UpsertResult:
+        """Insert KIS status-flag rows; an existing ``(snapshot_date, ticker)`` stays."""
+        if not records:
+            return UpsertResult()
+
+        result = UpsertResult()
+        deduped = {(record.snapshot_date, record.ticker): record for record in records}
+        args = [
+            (
+                record.snapshot_date,
+                record.ticker,
+                record.market.value,
+                record.mang_issu_cls_code,
+                record.temp_stop_yn,
+                record.mrkt_warn_cls_code,
+                record.invt_caful_yn,
+                record.short_over_yn,
+                record.sltr_yn,
+                record.iscd_stat_cls_code,
+                record.observed_at,
+                record.source.value,
+                record.run_id,
+                psycopg2.extras.Json(dict(record.raw_payload)),
+            )
+            for record in deduped.values()
+        ]
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                result.inserted = _execute_values_counted(
+                    cur,
+                    """
+                    INSERT INTO kis_stock_status_daily (
+                        snapshot_date, ticker, market, mang_issu_cls_code, temp_stop_yn,
+                        mrkt_warn_cls_code, invt_caful_yn, short_over_yn, sltr_yn,
+                        iscd_stat_cls_code, observed_at, source, run_id, raw_payload
+                    )
+                    VALUES %s
+                    ON CONFLICT (snapshot_date, ticker) DO NOTHING
+                    """,
+                    args,
+                    page_size=1000,
+                    template=(
+                        "(%s::date, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
+                        "%s::timestamptz, %s, %s::uuid, %s::jsonb)"
+                    ),
+                )
+        return result
+
+    def get_kis_stock_status_tickers(self, snapshot_date: date) -> set[str]:
+        """Return tickers that already have a status row for ``snapshot_date``."""
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT ticker FROM kis_stock_status_daily WHERE snapshot_date = %s",
+                    (snapshot_date,),
+                )
+                return {row[0] for row in cur.fetchall()}
 
     def count_krx_security_flow_daily_market_tickers(
         self,

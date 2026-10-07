@@ -2099,6 +2099,148 @@ def _handle_flows_sync_kis(args: argparse.Namespace) -> None:
         sys.exit(75 if result.aborted_reason == "SourceQuotaExhaustedError" else 1)
 
 
+def _handle_flows_sync_kis_status(args: argparse.Namespace) -> None:
+    """Handle ``collector flows sync-kis-status``."""
+    settings = get_settings()
+
+    from collector.kr.adapters.kis_common import KisClient, KisTokenCache, KisTokenProvider
+    from collector.kr.adapters.kis_stock_status import KisStockStatusProvider
+    from collector.kr.infra.calendar.trading_days import get_trading_days
+    from collector.kr.infra.db_postgres.repositories import PostgresStorage
+    from collector.kr.service.sync_kis_flows import load_kis_flow_targets
+    from collector.kr.service.sync_kis_stock_status import sync_kis_stock_status
+    from collector.kr.util.rate_limit import TokenBucket
+    from collector.kr.util.time import today_kst
+
+    tickers = _split_csv(args.tickers)
+    scope = UniverseScope(args.universe_scope)
+    snapshot_date = today_kst()
+
+    if not args.allow_non_trading_day and not get_trading_days(snapshot_date, snapshot_date):
+        # The flags describe the last session on a holiday; asking ~2,800 times
+        # to file an identical copy under a date with no session buys nothing.
+        print(f"→ flows sync-kis-status: {snapshot_date} is not a KRX trading day; skipped.")
+        return
+
+    requests_per_second = (
+        args.requests_per_second
+        if args.requests_per_second is not None
+        else settings.kis_requests_per_second
+    )
+    timeout_seconds = (
+        args.timeout_seconds if args.timeout_seconds is not None else settings.kis_timeout_seconds
+    )
+    token_cache_path = (
+        Path(args.token_cache_path)
+        if args.token_cache_path is not None
+        else settings.kis_token_cache_path
+    )
+    print(
+        f"→ flows sync-kis-status: snapshot_date={snapshot_date}, tickers={tickers}, "
+        f"scope={scope.value}, requests_per_second={requests_per_second}, "
+        f"timeout={timeout_seconds}, max_consecutive_failures={args.max_consecutive_failures}, "
+        f"max_missing_ratio={args.max_missing_ratio}, token_cache={token_cache_path}, "
+        f"plan_only={args.plan_only}"
+    )
+
+    storage = PostgresStorage(settings.db_dsn)
+
+    if args.plan_only:
+        targets = load_kis_flow_targets(storage, tickers, scope)
+        if not targets:
+            print("❌ KIS stock status plan failed: no targets.", file=sys.stderr)
+            sys.exit(1)
+        stored = storage.get_kis_stock_status_tickers(snapshot_date)
+        todo = [stock for stock in targets if stock.ticker not in stored]
+        print("✅ KIS stock status plan (no requests sent, no token issued).")
+        print(f"   - Targets: {len(targets)}")
+        print(f"   - Already stored for {snapshot_date}: {len(targets) - len(todo)}")
+        print(f"   - Planned requests: {len(todo)}")
+        return
+
+    if not settings.kis_app_key or not settings.kis_app_secret:
+        print(
+            "❌ KIS stock status sync failed: KIS_APP_KEY / KIS_APP_SECRET are not configured.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    token_provider = KisTokenProvider(
+        app_key=settings.kis_app_key,
+        app_secret=settings.kis_app_secret,
+        base_url=settings.kis_base_url,
+        cache=KisTokenCache(
+            token_cache_path,
+            refresh_margin_seconds=settings.kis_token_refresh_margin_seconds,
+        ),
+        timeout_seconds=timeout_seconds,
+    )
+    client = KisClient(
+        token_provider=token_provider,
+        app_key=settings.kis_app_key,
+        app_secret=settings.kis_app_secret,
+        base_url=settings.kis_base_url,
+        bucket=TokenBucket(requests_per_second, burst=settings.kis_max_burst_requests),
+        timeout_seconds=timeout_seconds,
+    )
+    provider = KisStockStatusProvider(client=client, snapshot_date=snapshot_date)
+
+    result = sync_kis_stock_status(
+        provider,
+        storage,
+        snapshot_date=snapshot_date,
+        tickers=tickers,
+        scope=scope,
+        max_consecutive_failures=args.max_consecutive_failures,
+    )
+
+    if result.aborted_reason:
+        print(
+            f"❌ KIS stock status sync aborted ({result.aborted_reason}): "
+            f"{result.errors.get('pipeline', '')}",
+            file=sys.stderr,
+        )
+    elif result.errors:
+        print(
+            f"⚠ KIS stock status sync completed with {len(result.errors)} failed tickers "
+            "(re-run the same command to fill them).",
+            file=sys.stderr,
+        )
+    else:
+        print("✅ KIS stock status sync completed.")
+
+    print(f"   - Snapshot date: {result.snapshot_date}")
+    print(f"   - Targets: {result.targets}")
+    print(f"   - Already stored: {result.already_stored}")
+    print(f"   - Requests attempted: {result.requests_attempted}")
+    print(f"   - Rows inserted: {result.rows_inserted}")
+    print(f"   - No-data requests: {result.no_data_requests}")
+    print(
+        f"   - Flagged: managed={result.flagged_managed}, "
+        f"temp_stop={result.flagged_temp_stop}, "
+        f"market_warning={result.flagged_market_warning}"
+    )
+    if result.http_counts:
+        print("   - Real HTTP:")
+        for key, value in sorted(result.http_counts.items()):
+            print(f"     {key}={value}")
+    for ticker, error in list(result.errors.items())[:10]:
+        print(f"   - Error {ticker}: {error}")
+
+    if result.aborted_reason:
+        sys.exit(75 if result.aborted_reason == "SourceQuotaExhaustedError" else 1)
+    missing_ratio = len(result.errors) / result.targets if result.targets else 0.0
+    if missing_ratio > args.max_missing_ratio:
+        # Some tickers fail for good (a code KIS no longer knows), so any failure
+        # at all must not turn the daily job red; a large share must.
+        print(
+            f"❌ {len(result.errors)} of {result.targets} tickers have no row "
+            f"({missing_ratio:.1%} > {args.max_missing_ratio:.1%}).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
 def _handle_universe_sync(args: argparse.Namespace) -> None:
     """Handle ``collector universe sync``."""
     settings = get_settings()
@@ -3989,6 +4131,71 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     flows_sync_kis.set_defaults(handler=_handle_flows_sync_kis)
+
+    flows_sync_kis_status = flows_sub.add_parser(
+        "sync-kis-status",
+        help=(
+            "Snapshot KIS status flags (관리종목·거래정지·시장경보) for every ticker, "
+            "one inquire-price call each. Re-running fills only the missing tickers."
+        ),
+    )
+    flows_sync_kis_status.add_argument(
+        "--tickers",
+        default=None,
+        help="Optional comma-separated ticker allowlist.",
+    )
+    flows_sync_kis_status.add_argument(
+        "--universe-scope",
+        choices=["current", "historical"],
+        default="current",
+        help="Which universe to target ('current' = the active universe).",
+    )
+    flows_sync_kis_status.add_argument(
+        "--requests-per-second",
+        type=float,
+        default=None,
+        help="Token-bucket rate for KIS calls (default: env KIS_REQUESTS_PER_SECOND or 1.0).",
+    )
+    flows_sync_kis_status.add_argument(
+        "--timeout-seconds",
+        type=_parse_positive_seconds,
+        default=None,
+        help="KIS HTTP timeout in seconds (default: env KIS_TIMEOUT_SECONDS or 20).",
+    )
+    flows_sync_kis_status.add_argument(
+        "--max-consecutive-failures",
+        type=int,
+        default=DEFAULT_KIS_MAX_CONSECUTIVE_FAILURES,
+        help="Stop after N consecutive failed requests (0 disables the guard).",
+    )
+    flows_sync_kis_status.add_argument(
+        "--max-missing-ratio",
+        type=float,
+        default=0.02,
+        help=(
+            "Exit 1 when more than this share of targets still has no row after the run "
+            "(default 0.02). Failed tickers are listed in ingestion_runs.params."
+        ),
+    )
+    flows_sync_kis_status.add_argument(
+        "--token-cache-path",
+        default=None,
+        help=(
+            "Where the KIS access token is cached (default: env KIS_TOKEN_CACHE_PATH). "
+            "Must be a host volume — every issuance notifies the account holder."
+        ),
+    )
+    flows_sync_kis_status.add_argument(
+        "--allow-non-trading-day",
+        action="store_true",
+        help="Run on a day without a KRX session (default: skip, exit 0).",
+    )
+    flows_sync_kis_status.add_argument(
+        "--plan-only",
+        action="store_true",
+        help="Print how many tickers are still missing today; no token, no request.",
+    )
+    flows_sync_kis_status.set_defaults(handler=_handle_flows_sync_kis_status)
 
     # -- universe -------------------------------------------------------------
     universe_parser = subparsers.add_parser("universe", help="Stock universe management.")

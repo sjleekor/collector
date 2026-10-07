@@ -1,0 +1,24 @@
+{
+  "_fixture_note": "KR모터스(000040) 모양: mang_issu_cls_code=Y, marg_rate 100, crdt_able_yn N은 probe에서 실측. 나머지 값은 손으로 썼다.",
+  "rt_cd": "0",
+  "msg_cd": "MCA00000",
+  "msg1": "정상처리 되었습니다.",
+  "output": {
+    "stck_prpr": "1520",
+    "stck_oprc": "273000",
+    "acml_vol": "21669476",
+    "per": "12.34",
+    "pbr": "1.23",
+    "frgn_hldn_qty": "2736287683",
+    "hts_frgn_ehrt": "46.80",
+    "iscd_stat_cls_code": "51",
+    "marg_rate": "100.00",
+    "crdt_able_yn": "N",
+    "mang_issu_cls_code": "Y",
+    "temp_stop_yn": "N",
+    "mrkt_warn_cls_code": "00",
+    "invt_caful_yn": "N",
+    "short_over_yn": "N",
+    "sltr_yn": "N"
+  }
+}

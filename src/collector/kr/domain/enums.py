@@ -113,6 +113,7 @@ class RunType(StrEnum):
     METRIC_NORMALIZE = "metric_normalize"
     KRX_FLOW_SYNC = "krx_flow_sync"
     KIS_FLOW_SYNC = "kis_flow_sync"
+    KIS_STOCK_STATUS_SYNC = "kis_stock_status_sync"
     XBRL_PARSE = "xbrl_parse"
     OPERATING_METRIC_SYNC = "operating_metric_sync"
     COMMON_FEATURE_SYNC = "common_feature_sync"
