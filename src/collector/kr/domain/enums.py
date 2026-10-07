@@ -108,6 +108,7 @@ class RunType(StrEnum):
     DART_SHARE_INFO_SYNC = "dart_share_info_sync"
     DART_CAPITAL_CHANGE_SYNC = "dart_capital_change_sync"
     DART_FILING_RECEIPT_SYNC = "dart_filing_receipt_sync"
+    DART_EXCHANGE_NOTICE_SYNC = "dart_exchange_notice_sync"
     DART_PERIODIC_EXTRAS_SYNC = "dart_periodic_extras_sync"
     XBRL_RECEIPT_BACKFILL = "xbrl_receipt_backfill"
     METRIC_NORMALIZE = "metric_normalize"
