@@ -234,6 +234,30 @@ sdc_prepare_us_run() {
   fi
 }
 
+# KIS wrapper 공통(flows-sync-kis.sh, flows-sync-kis-status.sh): 컨테이너를 호출 사용자로 돌리고,
+# 토큰 캐시(state/kis_token.json)를 그 사용자가 읽고 갱신할 수 있는지 컨테이너를 띄우기 전에 본다.
+# 못 읽는 상태로 돌리면 KisTokenCache.load가 PermissionError를 "캐시 없음"으로 삼켜 새 토큰을
+# 발급하고(계정 소유자에게 카카오톡 알림), 이어 store가 state/에 쓰지 못해 죽는다.
+# 못 읽거나 못 쓰면 종료 코드 73. 탈출구(SDC_RUN_AS_ROOT=1)면 검사하지 않는다.
+sdc_prepare_kis_run() {
+  sdc_append_run_as_invoking_user "" || return $?
+  if sdc_run_as_root_requested ""; then
+    return 0
+  fi
+  local state_dir="${SDC_APP_DIR}/state"
+  local token_file="${state_dir}/kis_token.json"
+  if [[ -e "$token_file" && ! -r "$token_file" ]]; then
+    sdc_log "not readable by uid $(id -u): $token_file — 이대로 돌리면 토큰을 새로 발급한다(카카오톡 알림)."
+    sdc_not_writable_hint ""
+    return 73
+  fi
+  if [[ ! -w "$state_dir" ]]; then
+    sdc_log "not writable by uid $(id -u): $state_dir — 토큰 캐시를 갱신하지 못한다."
+    sdc_not_writable_hint ""
+    return 73
+  fi
+}
+
 sdc_run_collector_with_lock() {
   local domain="$1"
   shift

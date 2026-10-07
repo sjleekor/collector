@@ -971,6 +971,13 @@ class SecurityFlowFetchResult:
     records: list[SecurityFlowLine] = field(default_factory=list)
     no_data: bool = False
     error: str | None = None
+    #: KIS ``inquire-price`` answers foreign holding and the status flags in one
+    #: response. A provider that was given a snapshot date parses the flags from
+    #: the same response (no extra request) and hands them back here. They are
+    #: independent of ``error``: a bad foreign-holding field must not lose the
+    #: flags, and a bad flag field must not lose the foreign holding.
+    status_record: StockStatusRecord | None = None
+    status_error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
