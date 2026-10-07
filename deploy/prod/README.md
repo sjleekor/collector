@@ -259,6 +259,30 @@ source lock은 `/tmp/sdc-locks/<domain>.lock`에 `flock`을 걸고, lock 획득 
 
 `flows-sync.sh.bak.20260425_2352`는 배포 디렉터리에 남아 있는 backup 파일이며 Cronicle event에서 호출하지 않는다.
 
+## 가격 vintage 트리거 `kr-price-vintage-trigger.sh` (2026-10-07 초안 · **Cronicle 미등록**)
+
+`daily_ohlcv`는 naver 조정 시계열이라 액면분할·병합이 생기면 과거 전체가 다시 쓰이는데, 증분 수집은 마지막 날짜 뒤만 받는다.
+이 잡이 **재수집 대상을 골라 목록만 남긴다. 재수집은 하지 않는다** — `prices backfill --refetch`는 사람이 목록을 보고 승인한 뒤 따로 돌린다.
+근거와 실측은 `my/milestones/kr/research/data/quality/01_price_adjustment_vintage.md` §7\~§9다.
+
+| 항목 | 값 |
+|---|---|
+| 명령 | `collector ops price-vintage-trigger` (운영 DB 읽기 전용, 원천 호출·소스 락 없음) |
+| 권장 일정 | 주 1회, 평일 저녁 수집이 끝난 뒤(예: 토요일 오전). 시총은 T+1이라 `as_of`는 마지막으로 적재된 시총 날짜다 |
+| 창 | 기본 `--lookback-days 14`. 한 번 걸러도 다음 주가 이어받는다. 이미 고쳐진 사건은 `resolved`로 빠져서 겹쳐도 대상에 안 다시 든다 |
+| 산출물 | `${STOCK_DATA_HOST_DIR}/kr/output/price_vintage_trigger/<as_of>/` 의 `targets.txt`(한 줄에 티커 하나)·`events.csv`·`summary.json`. 같은 `as_of`는 덮어쓴다 |
+| 재수집에 쓰는 법 | `paste -sd, targets.txt` → `prices backfill --source naver --refetch --universe-scope historical --tickers <목록>` (`--start`를 주지 않는다. `sdc_run_daily_collector krx_marketdata`로 낮에) |
+| 사전 검사 | 산출 디렉터리에 쓸 수 없으면 **73**. 탈출구 `SDC_RUN_AS_ROOT=1` |
+
+**판정.** 연속 두 세션의 `listed_shares` 비 `k`와 미수정 종가 비 `p`로 `k x p ~ 1`(시총 연속)인 사건을 기계적 변경으로 본다. `p ~ 1`인 주식 수 변화(시장가 유상증자)는 뺀다.
+그 뒤 `daily_ohlcv.close / source_close`(naver가 그날에 적용한 조정계수)가 사건 앞 행에서 `R_S / k`인지 본다. 아니면 `stale`이고 그 티커가 대상이다.
+**`listed_shares`는 거래 재개일에야 바뀐다.** naver는 정지 시작일에 먼저 다시 쓰므로, 주식 수 사건이 없는 날의 `R` 단계(`rebase_step`)도 대상에 넣는다.
+
+**`summary.json`의 `refetched_unresolved_tickers`는 대상이 아니다.** 사건 뒤에 이미 재수집했는데도 낡은 값이 남은 티커(003060형: naver가 그 사건을 조정하지 않는다)다.
+같은 호출을 매주 되풀이하지 않도록 뺐고, 사람이 판단할 몫이다. 거래 정지로 사건 뒤 쓸 수 있는 행이 없는 사건은 `unknown`이라 대상에서 빠지고 `events.csv`에 남는다.
+
+**못 잡는 것.** 주식 수도 가격도 안 바뀐 채 naver만 조정한 정지 종목, 주식 수 변화가 `--min-share-ratio`(기본 1.5배) 아래인 사건. 2014-07 이전 구간은 재수집으로도 못 고친다(원주가 + 차분 경로가 답).
+
 ## 컨테이너 실행 사용자와 파일 소유자 (2026-10-05)
 
 컨테이너는 이미지 기본이 root라 호스트에 마운트한 경로에 root 소유 파일이 남는다. whi가 지우거나 순환(rotation)할 수 없고,
@@ -270,6 +294,7 @@ US 레이크에는 이미 root 소유 9,500여 개가 쌓였다(2026-10-05 실�
 |---|---|
 | `kr-raw-parquet-export.sh` | `kr/raw/raw_postgres/snapshot_date=<D>` 전체, `kr/raw/_tmp` (`--dry-run`은 생략) |
 | `kr-export-wait-ready.sh` | 증거 파일 `K=<K>.json`과 그 디렉터리 |
+| `kr-price-vintage-trigger.sh` | `kr/output/price_vintage_trigger` (`KR_VINTAGE_TRIGGER_DIR`로 바꾼다) |
 | `us-daily.sh`·`us-derive-daily.sh`·`us-derive.sh`·`us-universe-incremental.sh` | `us/raw`·`us/derived`·`us/output` (`--dry-run`은 생략) |
 | `us-nasdaq-analyst.sh` | `us/raw/nasdaq`만 (`--dry-run`은 생략). 다른 경로의 소유자 문제로 이 잡이 멈추지 않게 범위를 좁혔다 |
 
