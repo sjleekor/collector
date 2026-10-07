@@ -30,6 +30,7 @@ from collector.kr.service.freshness import (
 )
 from collector.kr.service.sync_krx_flows import (
     DISCONTINUED_FLOW_METRICS,
+    METRIC_PUBLICATION_LAG_SESSIONS,
     SHORTING_BALANCE_METRIC,
     active_flow_metrics,
 )
@@ -373,33 +374,75 @@ def _shorting_storage(balance: date) -> _FlowStorage:
     )
 
 
-def test_the_krx_only_balance_metric_is_declared_discontinued() -> None:
-    # KIS covers six of the seven flow metrics. If the seventh stays in the
-    # budget, decommissioning KRX (K-5) makes this gate fire every morning.
-    assert SHORTING_BALANCE_METRIC in DISCONTINUED_FLOW_METRICS
-    assert SHORTING_BALANCE_METRIC not in active_flow_metrics("shorting")
-    assert set(active_flow_metrics("shorting")) == {"short_selling_volume", "short_selling_value"}
+WEDNESDAY = date(2026, 8, 12)
+TUESDAY_BEFORE = date(2026, 8, 11)
 
 
-def test_a_group_takes_its_date_from_the_metrics_still_collected() -> None:
-    # The group date is a minimum, so before this change one frozen metric
-    # became the group's date no matter how current the other two were.
-    report = build_freshness_report(_shorting_storage(balance=date(2026, 8, 1)))
+def test_the_short_balance_is_collected_and_gated_not_discontinued() -> None:
+    # Production still collects the MDC balance (2026-10-07), so it must not
+    # sit in the discontinued list, which turns its gate off.
+    assert SHORTING_BALANCE_METRIC not in DISCONTINUED_FLOW_METRICS
+    assert SHORTING_BALANCE_METRIC in active_flow_metrics("shorting")
+    assert METRIC_PUBLICATION_LAG_SESSIONS[SHORTING_BALANCE_METRIC] == 2
+
+
+def test_the_balance_is_left_out_of_the_group_date() -> None:
+    # Two sessions behind is normal for it; the group date must stay the
+    # same-session budget's concern.
+    report = build_freshness_report(_shorting_storage(balance=WEDNESDAY))
 
     assert report.flow_group_latest_dates["shorting"] == FRIDAY
+    assert report.flow_metric_latest_dates[SHORTING_BALANCE_METRIC] == WEDNESDAY
 
 
-def test_turning_krx_off_does_not_make_the_shorting_gate_fire_daily() -> None:
-    # The regression this exists for: KRX is decommissioned, the balance
-    # freezes on its last scraped date, and the other two keep arriving.
-    report = build_freshness_report(_shorting_storage(balance=date(2026, 8, 1)))
+def test_a_balance_two_sessions_behind_is_current() -> None:
+    # Friday evening: the newest publishable measurement date is Wednesday
+    # (Fri is session 0, Thu 1, Wed 2). max_lag 1 + publication lag 2 = 3rd
+    # newest session.
+    report = build_freshness_report(_shorting_storage(balance=WEDNESDAY))
 
     assert _evaluate(report) == []
 
 
+def test_a_balance_three_sessions_behind_is_stale_at_the_default_lag() -> None:
+    # The case production hit on about 19% of days (nearly every day in
+    # September 2026): the row for Wednesday arrives a session late. The
+    # default budget reports it; the CLI flag widens it.
+    report = build_freshness_report(_shorting_storage(balance=TUESDAY_BEFORE))
+
+    findings = _evaluate(report)
+
+    assert [finding.domain for finding in findings] == [
+        f"krx_security_flow_raw:{SHORTING_BALANCE_METRIC}"
+    ]
+    assert findings[0].required_at_or_after == WEDNESDAY
+    assert _evaluate(report, metric_publication_lag_sessions={SHORTING_BALANCE_METRIC: 3}) == []
+
+
+def test_a_frozen_balance_now_fires_the_gate() -> None:
+    # The reason the metric left the discontinued list: if the collector really
+    # stops, the gate has to notice.
+    report = build_freshness_report(_shorting_storage(balance=date(2026, 8, 1)))
+
+    findings = _evaluate(report)
+
+    assert [finding.domain for finding in findings] == [
+        f"krx_security_flow_raw:{SHORTING_BALANCE_METRIC}"
+    ]
+
+
+def test_a_missing_balance_is_stale_when_its_group_is_reported() -> None:
+    storage = _shorting_storage(balance=FRIDAY)
+    del storage._metric_dates[SHORTING_BALANCE_METRIC]
+
+    findings = _evaluate(build_freshness_report(storage))
+
+    assert [finding.latest for finding in findings] == [None]
+
+
 def test_the_gate_still_fires_when_a_collected_shorting_metric_lags() -> None:
-    # Excluding the discontinued metric must not excuse the whole group.
-    storage = _shorting_storage(balance=date(2026, 8, 1))
+    # The balance's lag allowance must not excuse the same-session metrics.
+    storage = _shorting_storage(balance=FRIDAY)
     storage._metric_dates["short_selling_volume"] = THURSDAY
 
     findings = _evaluate(build_freshness_report(storage))
@@ -407,14 +450,18 @@ def test_the_gate_still_fires_when_a_collected_shorting_metric_lags() -> None:
     assert [finding.domain for finding in findings] == ["krx_security_flow_raw:shorting"]
 
 
-def test_a_discontinued_metric_keeps_its_last_date_in_the_report() -> None:
+def test_a_discontinued_metric_keeps_its_last_date_in_the_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # Dropping it from the budget must not drop it from view — otherwise the
     # group merely stops moving and nobody can tell why.
+    monkeypatch.setitem(freshness.DISCONTINUED_FLOW_METRICS, SHORTING_BALANCE_METRIC, "KIS test")
     report = build_freshness_report(_shorting_storage(balance=date(2026, 8, 1)))
 
     assert report.flow_metric_latest_dates[SHORTING_BALANCE_METRIC] == date(2026, 8, 1)
     assert SHORTING_BALANCE_METRIC in report.discontinued_flow_metrics
-    assert "KIS" in report.discontinued_flow_metrics[SHORTING_BALANCE_METRIC]
+    assert report.flow_group_latest_dates["shorting"] == FRIDAY
+    assert _evaluate(report) == []
 
 
 def test_an_unrecognised_group_is_still_gated() -> None:
