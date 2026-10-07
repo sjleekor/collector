@@ -149,6 +149,16 @@ output_partitions = []
 order_by = ["observed_month", "corp_code"]
 jsonb_columns = ["profile_raw"]
 
+# 4.2-b. One row per ticker per day (~2,800/day, ~1M/year), so a single
+# unpartitioned read stays cheap for years. Composite PK, no raw_id.
+[[tables]]
+name = "kis_stock_status_daily"
+priority = "P1"
+extract_strategy = "full_table"
+output_partitions = []
+order_by = ["snapshot_date", "ticker"]
+jsonb_columns = ["raw_payload"]
+
 [[tables]]
 name = "stock_master"
 priority = "P1"
