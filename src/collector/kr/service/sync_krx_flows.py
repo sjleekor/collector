@@ -70,16 +70,38 @@ FLOW_METRIC_GROUPS: dict[str, tuple[str, ...]] = {
 #: here keeps it visible in the freshness report, with its last date, while
 #: taking it out of the staleness budget.
 #:
-#: This is a statement about *us*, not about upstream: KRX still publishes the
-#: short-selling balance. We stopped collecting it because the KRX MDC scraping
-#: path is being decommissioned (K-5) and the KIS replacement covers six of the
-#: seven flow metrics but has no balance endpoint (K-6f). Restoring a collector
-#: means deleting the entry here in the same change.
-DISCONTINUED_FLOW_METRICS: dict[str, str] = {
-    SHORTING_BALANCE_METRIC: (
-        "KRX MDC only. The KIS replacement (K-6f) has no equivalent endpoint, "
-        "and the MDC scraping path was decommissioned in K-5."
-    ),
+#: Empty since 2026-10-07 (KR October plan 4.1). The short-selling balance used to
+#: be listed here on the assumption that the KRX MDC path was gone (K-5) and KIS
+#: had no balance endpoint (K-6f). Production disproved it: the MDC balance is
+#: still collected daily (latest measurement date trails by 2-3 sessions), so
+#: declaring it discontinued only switched off the one gate that would notice
+#: it really stopping. It is gated by its publication lag instead, see
+#: :data:`METRIC_PUBLICATION_LAG_SESSIONS`.
+#:
+#: The mechanism stays for the next metric that is genuinely given up on. A
+#: group's freshness is the *minimum* over its metrics, so one metric nobody
+#: collects drags its whole group permanently stale; declaring it here keeps it
+#: visible in the freshness report, with its last date, while taking it out of
+#: the staleness budget. Restoring a collector means deleting the entry here in
+#: the same change.
+DISCONTINUED_FLOW_METRICS: dict[str, str] = {}
+
+#: Sessions between a metric's measurement date and the date its row can exist.
+#:
+#: KRX publishes the short-selling balance on measurement date + 2 business
+#: days, but often after the evening flow run (18:4x KST) picks it up, so the
+#: row lands one session later. A metric listed here is judged against
+#: ``budget + lag`` sessions instead of the budget alone, and is left out of its
+#: group's date (which would otherwise sit sessions behind and fail the
+#: same-session budget every day).
+#:
+#: 3, not 2 (decided 2026-10-07): from 2026-09-01 to 10-07 the newest balance at
+#: 23:00 was 2 sessions old on 8 trading days and 3 on 16, never 4 — a budget of
+#: 2 fails two days in three, 3 fails none. Our run start did not move
+#: (18:39-18:40 every month), so KRX publishes later than it used to. Override
+#: per run with ``--short-balance-publication-lag-sessions`` when this moves.
+METRIC_PUBLICATION_LAG_SESSIONS: dict[str, int] = {
+    SHORTING_BALANCE_METRIC: 3,
 }
 
 
@@ -97,6 +119,19 @@ def active_flow_metrics(group: str) -> tuple[str, ...]:
         metric
         for metric in FLOW_METRIC_GROUPS.get(group, ())
         if metric not in DISCONTINUED_FLOW_METRICS
+    )
+
+
+def same_session_flow_metrics(group: str) -> tuple[str, ...]:
+    """Active metrics in *group* that are published without a lag.
+
+    Excludes anything in :data:`METRIC_PUBLICATION_LAG_SESSIONS`; those are
+    gated one by one against their own publication lag.
+    """
+    return tuple(
+        metric
+        for metric in active_flow_metrics(group)
+        if metric not in METRIC_PUBLICATION_LAG_SESSIONS
     )
 
 
