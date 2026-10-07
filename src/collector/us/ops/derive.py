@@ -43,6 +43,9 @@ class Recipe:
     tables: tuple[str, ...]
     #: dolt 레포 이름. 있으면 ``source_rev`` 로 판단한다
     dolt_repo: str | None = None
+    #: ``dolt_repo`` 에서 이 표가 읽는 dolt 표들. HEAD 커밋이 바뀌어도 이 표들의
+    #: 내용이 그대로면 다시 굳히지 않는다 (``needs_rebuild``).
+    dolt_tables: tuple[str, ...] = ()
     #: ``raw/`` 아래 상대 경로들. ``dolt_repo`` 가 없을 때 mtime 으로 판단한다
     raw_inputs: tuple[str, ...] = ()
     #: **앞을 내다보는 표.** 표의 마지막 날이 오늘로부터 이만큼 안으로
@@ -57,16 +60,19 @@ RECIPES: dict[str, Recipe] = {
         "collector.us.sources.dolt:load_prices_daily",
         ("prices_daily",),
         dolt_repo="stocks",
+        dolt_tables=("ohlcv",),
     ),
     "corp-actions": Recipe(
         "collector.us.sources.dolt:load_corp_actions",
         ("corp_actions",),
         dolt_repo="stocks",
+        dolt_tables=("split", "dividend"),
     ),
     "volatility-daily": Recipe(
         "collector.us.sources.dolt:load_volatility_daily",
         ("volatility_daily",),
         dolt_repo="options",
+        dolt_tables=("volatility_history",),
     ),
     "short-interest": Recipe(
         "collector.us.sources.finra:load_short_interest",
@@ -265,6 +271,16 @@ def needs_rebuild(root: DataRoot, name: str, recipe: Recipe) -> tuple[bool, str]
         have = _snapshot_rev(snap)
         if have == head:
             return False, f"source_rev 그대로 ({head[:8]})"
+        # DoltHub 는 새 세션이 없는 날에도 커밋을 쌓는다 (2026-10-04·05: 커밋만 바뀌고
+        # prices_daily 는 행 수·마지막 날 그대로). 읽는 표의 내용이 안 바뀌었으면
+        # 새 스냅샷을 쓰지 않는다 — 유니버스 completion 이 가리키는 입력이 낡아 보이지 않게.
+        if have and recipe.dolt_tables:
+            unchanged = dolt.tables_unchanged(repo, have, head, recipe.dolt_tables)
+            if unchanged:
+                return False, (
+                    f"source_rev 바뀜 ({have[:8]} → {head[:8]}) 이나 "
+                    f"{'·'.join(recipe.dolt_tables)} 내용 그대로"
+                )
         return True, f"source_rev {(have or '없음')[:8]} → {head[:8]}"
 
     snap_mtime = snap.stat().st_mtime

@@ -51,6 +51,7 @@ def _patch_dolt(monkeypatch, root, head, loader=None):
         repo_dir=lambda r, repo: r.raw / "dolt" / repo,
         head_commit=lambda _path: head["rev"],
         load_prices_daily=load_prices_daily,
+        tables_unchanged=lambda *_a: False,  # 내용 비교는 test_us_derive 가 본다
     )
     monkeypatch.setitem(sys.modules, "collector.us.sources.dolt", fake_dolt)
     monkeypatch.setitem(

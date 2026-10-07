@@ -90,6 +90,30 @@ def head_commit(repo: Path) -> str:
     return lines[1]
 
 
+def tables_unchanged(repo: Path, old_rev: str, new_rev: str, tables: tuple[str, ...]) -> bool:
+    """두 커밋 사이에 ``tables`` 의 데이터·스키마가 안 바뀌었나.
+
+    ``dolt_diff_summary`` 는 바뀐 표만 행으로 내므로 **행이 없으면 그대로**다.
+    행을 읽지 않아 싸다. **판단할 수 없으면 False** (커밋을 못 찾는 등) — 호출한 쪽이
+    다시 굳히는 쪽으로 간다.
+    """
+    try:
+        for table in tables:
+            out = _run(
+                repo,
+                "sql",
+                "-q",
+                f"select * from dolt_diff_summary('{old_rev}', '{new_rev}', '{table}')",
+                "-r",
+                "csv",
+            )
+            if [ln for ln in out.splitlines() if ln.strip()][1:]:
+                return False
+    except (DoltError, OSError):
+        return False
+    return True
+
+
 def export_table(repo: Path, table: str, dest: Path) -> Path:
     """``dolt table export`` — parquet을 그대로 낸다. 원천 타입이 보존된다."""
     dest.parent.mkdir(parents=True, exist_ok=True)

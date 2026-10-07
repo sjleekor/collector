@@ -245,3 +245,105 @@ def test_failed_validation_does_not_look_up_to_date_on_the_next_run(tmp_path, mo
     second = derive.run_derive(root, snapshot_date="2026-10-04", tables=("submissions",))
     assert second["ok"] is True and second["rebuilt"] == 1
     assert latest_snapshot(root, "filings_index").parent.name == "snapshot_date=2026-10-04"
+
+
+# --- 내용이 같으면 새 스냅샷을 쓰지 않는다 (2026-10-07) ---------------------------
+
+
+def test_dolt_head_moved_but_tables_unchanged_skips(tmp_path, monkeypatch) -> None:
+    """새 세션 없는 날: DoltHub 커밋만 늘고 ohlcv 는 그대로 → 안 굳힌다."""
+    root = DataRoot(tmp_path)
+    _write_snapshot(root, "prices_daily", "2026-10-03", source_rev="aaaaaaaa11111111")
+    (root.raw / "dolt" / "stocks" / ".dolt").mkdir(parents=True)
+
+    from collector.us.sources import dolt
+
+    seen = {}
+
+    def fake_unchanged(_repo, old, new, tables):
+        seen.update(old=old, new=new, tables=tables)
+        return True
+
+    monkeypatch.setattr(dolt, "head_commit", lambda _p: "bbbbbbbb22222222")
+    monkeypatch.setattr(dolt, "tables_unchanged", fake_unchanged)
+    should, why = derive.needs_rebuild(root, "prices-daily", derive.RECIPES["prices-daily"])
+    assert not should and "내용 그대로" in why
+    assert seen == {"old": "aaaaaaaa11111111", "new": "bbbbbbbb22222222", "tables": ("ohlcv",)}
+
+
+def test_dolt_head_moved_and_tables_changed_rebuilds(tmp_path, monkeypatch) -> None:
+    """새 세션이 있는 날은 지금과 똑같이 새로 굳힌다."""
+    root = DataRoot(tmp_path)
+    _write_snapshot(root, "prices_daily", "2026-10-05", source_rev="aaaaaaaa11111111")
+    (root.raw / "dolt" / "stocks" / ".dolt").mkdir(parents=True)
+
+    from collector.us.sources import dolt
+
+    monkeypatch.setattr(dolt, "head_commit", lambda _p: "bbbbbbbb22222222")
+    monkeypatch.setattr(dolt, "tables_unchanged", lambda *_a: False)
+    should, why = derive.needs_rebuild(root, "prices-daily", derive.RECIPES["prices-daily"])
+    assert should and "→ bbbbbbbb" in why
+
+
+def test_every_dolt_recipe_names_its_dolt_tables() -> None:
+    for name, recipe in derive.RECIPES.items():
+        if recipe.dolt_repo:
+            assert recipe.dolt_tables, f"{name}: 읽는 dolt 표를 적는다"
+
+
+def test_run_derive_skip_writes_no_snapshot_and_says_why(tmp_path, monkeypatch) -> None:
+    root = DataRoot(tmp_path)
+    _write_snapshot(root, "prices_daily", "2026-10-03", source_rev="aaaaaaaa11111111")
+    (root.raw / "dolt" / "stocks" / ".dolt").mkdir(parents=True)
+
+    from collector.us.sources import dolt
+
+    monkeypatch.setattr(dolt, "head_commit", lambda _p: "bbbbbbbb22222222")
+    monkeypatch.setattr(dolt, "tables_unchanged", lambda *_a: True)
+    monkeypatch.setattr(derive, "_journal_price_arrival", lambda *_a, **_k: None)
+    result = derive.run_derive(root, snapshot_date="2026-10-05", tables=("prices-daily",))
+    assert result["rebuilt"] == 0 and result["skipped"] == 1
+    assert "내용 그대로" in result["tables"][0]["reason"]
+    days = sorted(p.name for p in (root.derived / "snapshots" / "prices_daily").iterdir())
+    assert days == ["snapshot_date=2026-10-03"]
+
+
+def test_tables_unchanged_with_a_real_dolt_repo(tmp_path) -> None:
+    import shutil
+    import subprocess
+
+    if shutil.which("dolt") is None:
+        pytest.skip("dolt 가 없다")
+    from collector.us.sources import dolt
+
+    env = {**os.environ, "HOME": str(tmp_path)}  # 전역 dolt 설정을 건드리지 않는다
+
+    def run(*args: str) -> str:
+        return subprocess.run(
+            ["dolt", *args], cwd=tmp_path / "r", env=env, capture_output=True, text=True, check=True
+        ).stdout
+
+    (tmp_path / "r").mkdir()
+    run("config", "--global", "--add", "user.name", "t")
+    run("config", "--global", "--add", "user.email", "t@localhost")
+    run("init")
+    run("sql", "-q", "create table a (k int primary key, v int)")
+    run("sql", "-q", "create table b (k int primary key)")
+    run("sql", "-q", "insert into a values (1, 1)")
+    run("add", ".")
+    run("commit", "-m", "c1")
+    rev1 = dolt.head_commit(tmp_path / "r")
+    run("sql", "-q", "insert into b values (1)")
+    run("add", ".")
+    run("commit", "-m", "c2")
+    rev2 = dolt.head_commit(tmp_path / "r")
+    run("sql", "-q", "insert into a values (2, 2)")
+    run("add", ".")
+    run("commit", "-m", "c3")
+    rev3 = dolt.head_commit(tmp_path / "r")
+
+    repo = tmp_path / "r"
+    assert dolt.tables_unchanged(repo, rev1, rev2, ("a",))
+    assert not dolt.tables_unchanged(repo, rev1, rev2, ("a", "b"))
+    assert not dolt.tables_unchanged(repo, rev1, rev3, ("a",))
+    assert not dolt.tables_unchanged(repo, "nonexistent", rev3, ("a",))  # 모르면 다시 굳힌다
