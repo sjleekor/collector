@@ -119,6 +119,37 @@ class DailyBar:
 
 
 @dataclass(frozen=True, slots=True)
+class MarketCapPoint:
+    """The ``daily_market_cap`` columns the price-vintage trigger reads (all required, > 0)."""
+
+    ticker: str
+    market: str
+    trade_date: date
+    listed_shares: int
+    source_close: int
+    fetched_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class OhlcvPoint:
+    """A ``daily_ohlcv`` row with the same day's unadjusted ``source_close`` from market cap.
+
+    ``close / source_close`` is the adjustment factor naver applied to that day; ``None`` when
+    ``daily_market_cap`` has no row for the day.
+    """
+
+    ticker: str
+    market: str
+    trade_date: date
+    open: int
+    high: int
+    low: int
+    close: int
+    source_close: int | None = None
+    fetched_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class DailyMarketCapRow:
     """Single day of KRX market cap / trading value / listed shares for a stock.
 

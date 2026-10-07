@@ -42,6 +42,16 @@ from collector.kr.service.freshness import (
     DEFAULT_MAX_LAG_TRADING_DAYS,
     DEFAULT_MAX_MARKET_CAP_LAG_TRADING_DAYS,
 )
+from collector.kr.service.price_vintage_trigger import (
+    DEFAULT_CHECK_BACK_DAYS,
+    DEFAULT_KP_TOLERANCE,
+    DEFAULT_MIN_BAD_BARS,
+    DEFAULT_MIN_SHARE_RATIO,
+    DEFAULT_R_TOLERANCE,
+)
+from collector.kr.service.price_vintage_trigger import (
+    DEFAULT_LOOKBACK_DAYS as DEFAULT_LOOKBACK_DAYS_VINTAGE,
+)
 from collector.kr.service.sync_kis_flows import (
     DEFAULT_LOOKBACK_DAYS as DEFAULT_KIS_LOOKBACK_DAYS,
 )
@@ -537,6 +547,59 @@ def _handle_ops_freshness_report(args: argparse.Namespace) -> None:
     for finding in findings:
         print(f"   - {finding.describe()}", file=sys.stderr)
     sys.exit(1)
+
+
+def _handle_ops_price_vintage_trigger(args: argparse.Namespace) -> None:
+    """Handle ``collector ops price-vintage-trigger``.
+
+    Read-only on the database. Writes ``targets.txt``/``events.csv``/``summary.json`` under
+    ``<output-dir>/<as_of>/`` and never starts a re-fetch; a person approves that.
+    """
+    from pathlib import Path
+
+    from collector.kr.infra.db_postgres.repositories import PostgresStorage
+    from collector.kr.service.price_vintage_trigger import (
+        TriggerConfig,
+        build_trigger_report,
+        write_trigger_outputs,
+    )
+    from collector.lake import DataRoot
+
+    storage = PostgresStorage(get_settings().db_dsn)
+    try:
+        as_of = (
+            date.fromisoformat(args.as_of) if args.as_of else storage.get_latest_market_cap_date()
+        )
+    except ValueError as exc:
+        print(f"❌ invalid --as-of: {exc}", file=sys.stderr)
+        sys.exit(2)
+    if as_of is None:
+        print("❌ daily_market_cap is empty; nothing to compare.", file=sys.stderr)
+        sys.exit(1)
+
+    output_dir = (
+        Path(args.output_dir)
+        if args.output_dir
+        else DataRoot.resolve("kr").output / "price_vintage_trigger"
+    )
+    cfg = TriggerConfig(
+        as_of=as_of,
+        lookback_days=args.lookback_days,
+        min_share_ratio=args.min_share_ratio,
+        kp_tolerance=args.kp_tolerance,
+        check_back_days=args.check_back_days,
+        r_tolerance=args.r_tolerance,
+        min_bad_bars=args.min_bad_bars,
+    )
+    report = build_trigger_report(storage, cfg)
+    day_dir = write_trigger_outputs(report, output_dir)
+
+    targets = report.targets
+    print(f"✅ price vintage trigger as_of={as_of} window_start={report.window_start}")
+    print(f"   - share events (mechanical): {len(report.events)} {report.count_by_status()}")
+    print(f"   - rebase steps without a share event: {len(report.steps)}")
+    print(f"   - re-fetch candidates: {len(targets)} tickers -> {day_dir / 'targets.txt'}")
+    print("   - NOT re-fetched. Approve, then run `prices backfill --refetch` on targets.txt.")
 
 
 def _handle_ops_kr_export_readiness(args: argparse.Namespace) -> None:
@@ -3111,6 +3174,77 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     ops_freshness.set_defaults(handler=_handle_ops_freshness_report)
+
+    ops_vintage = ops_sub.add_parser(
+        "price-vintage-trigger",
+        help=(
+            "List tickers whose daily_ohlcv needs a --refetch (listed_shares diff, k x p ~ 1). "
+            "Read-only; writes a candidate list, never re-fetches."
+        ),
+    )
+    ops_vintage.add_argument(
+        "--as-of",
+        default=None,
+        help="Last session to look at, YYYY-MM-DD (default: latest daily_market_cap date).",
+    )
+    ops_vintage.add_argument(
+        "--lookback-days",
+        type=int,
+        default=DEFAULT_LOOKBACK_DAYS_VINTAGE,
+        help=(
+            "Calendar days before --as-of to scan for events "
+            f"(default: {DEFAULT_LOOKBACK_DAYS_VINTAGE}; "
+            "two weeks, so one missed weekly run is covered)."
+        ),
+    )
+    ops_vintage.add_argument(
+        "--min-share-ratio",
+        type=float,
+        default=DEFAULT_MIN_SHARE_RATIO,
+        help=(
+            "max(k, 1/k) needed to count a share-count change "
+            f"(default: {DEFAULT_MIN_SHARE_RATIO})."
+        ),
+    )
+    ops_vintage.add_argument(
+        "--kp-tolerance",
+        type=float,
+        default=DEFAULT_KP_TOLERANCE,
+        help=f"k*p within 1 +/- this is a mechanical event (default: {DEFAULT_KP_TOLERANCE}).",
+    )
+    ops_vintage.add_argument(
+        "--check-back-days",
+        type=int,
+        default=DEFAULT_CHECK_BACK_DAYS,
+        help=(
+            "Stored rows this many days before an event are checked "
+            f"(default: {DEFAULT_CHECK_BACK_DAYS})."
+        ),
+    )
+    ops_vintage.add_argument(
+        "--r-tolerance",
+        type=float,
+        default=DEFAULT_R_TOLERANCE,
+        help=(
+            "Allowed deviation of close/source_close from the expected factor "
+            f"(default: {DEFAULT_R_TOLERANCE})."
+        ),
+    )
+    ops_vintage.add_argument(
+        "--min-bad-bars",
+        type=int,
+        default=DEFAULT_MIN_BAD_BARS,
+        help=f"Stale rows needed to call an event stale (default: {DEFAULT_MIN_BAD_BARS}).",
+    )
+    ops_vintage.add_argument(
+        "--output-dir",
+        default=None,
+        help=(
+            "Directory for <as_of>/targets.txt etc. "
+            "(default: $STOCK_DATA_ROOT/kr/output/price_vintage_trigger)."
+        ),
+    )
+    ops_vintage.set_defaults(handler=_handle_ops_price_vintage_trigger)
 
     ops_readiness = ops_sub.add_parser(
         "kr-export-readiness",

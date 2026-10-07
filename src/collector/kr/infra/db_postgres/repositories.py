@@ -43,8 +43,10 @@ from collector.kr.domain.models import (
     DartXbrlDocument,
     DartXbrlFactLine,
     IngestionRun,
+    MarketCapPoint,
     MetricCatalogEntry,
     MetricMappingRule,
+    OhlcvPoint,
     OperatingMetricFact,
     OperatingSourceDocument,
     SecurityFlowLine,
@@ -4324,6 +4326,53 @@ class PostgresStorage:
                 )
                 rows = cur.fetchall()
         return {row[0]: int(row[1]) for row in rows}
+
+    def get_market_cap_points(self, since: date, until: date) -> list[MarketCapPoint]:
+        """Return usable ``daily_market_cap`` rows in ``[since, until]`` (read-only).
+
+        Rows whose ``listed_shares`` or ``source_close`` is missing or not positive carry no
+        ratio and are left out. Feeds the price vintage trigger.
+        """
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT ticker, market, trade_date, listed_shares, source_close, fetched_at
+                    FROM daily_market_cap
+                    WHERE trade_date BETWEEN %s AND %s
+                      AND listed_shares > 0
+                      AND source_close > 0
+                    """,
+                    (since, until),
+                )
+                rows = cur.fetchall()
+        return [MarketCapPoint(*row) for row in rows]
+
+    def get_ohlcv_points(
+        self, tickers: list[str] | None, since: date, until: date
+    ) -> list[OhlcvPoint]:
+        """Return ``daily_ohlcv`` rows in ``[since, until]`` with the day's ``source_close``.
+
+        ``tickers=None`` reads every ticker. Read-only; feeds the price vintage trigger.
+        """
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT o.ticker, o.market, o.trade_date, o.open, o.high, o.low, o.close,
+                           m.source_close, o.fetched_at
+                    FROM daily_ohlcv o
+                    LEFT JOIN daily_market_cap m
+                           ON m.trade_date = o.trade_date
+                          AND m.ticker = o.ticker
+                          AND m.market = o.market
+                    WHERE o.trade_date BETWEEN %s AND %s
+                      AND (%s::text[] IS NULL OR o.ticker = ANY(%s::text[]))
+                    """,
+                    (since, until, tickers, tickers),
+                )
+                rows = cur.fetchall()
+        return [OhlcvPoint(*row) for row in rows]
 
     def get_latest_market_cap_date(self) -> date | None:
         """Return the latest stored ``daily_market_cap`` trade_date."""
