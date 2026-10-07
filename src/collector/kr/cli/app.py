@@ -1494,6 +1494,140 @@ def _handle_dart_sync_filings(args: argparse.Namespace) -> None:
     _exit_if_opendart_key_exhausted(result, "OpenDART filing receipt sync")
 
 
+def _run_exchange_notice_sync(
+    args: argparse.Namespace,
+    windows: list[tuple[date, date]],
+    *,
+    mode: str,
+    force: bool,
+    label: str,
+) -> None:
+    """Shared body of ``dart backfill-exchange-notices`` / ``dart sync-exchange-notices``."""
+    settings = get_settings()
+
+    from collector.kr.adapters.opendart_exchange_notice.provider import (
+        OpenDartExchangeNoticeProvider,
+    )
+    from collector.kr.infra.db_postgres.exchange_notice_store import (
+        PostgresExchangeNoticeStore,
+    )
+    from collector.kr.infra.db_postgres.repositories import PostgresStorage
+    from collector.kr.service.sync_dart_exchange_notices import sync_exchange_notices
+
+    try:
+        request_executor = _build_opendart_request_executor()
+    except Exception as exc:
+        print(f"❌ {label} failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    result = sync_exchange_notices(
+        provider=OpenDartExchangeNoticeProvider(request_executor=request_executor),
+        store=PostgresExchangeNoticeStore(settings.db_dsn),
+        run_storage=PostgresStorage(settings.db_dsn),
+        windows=windows,
+        rate_limit_seconds=args.rate_limit_seconds,
+        force=force,
+        max_requests=args.max_requests,
+        mode=mode,
+    )
+
+    if result.errors:
+        print(f"⚠ {label} completed with {len(result.errors)} errors.", file=sys.stderr)
+    elif result.stopped_reason:
+        print(f"⏸ {label} stopped: {result.stopped_reason} (rerun resumes).")
+    else:
+        print(f"✅ {label} completed.")
+    print(
+        f"   - Windows: total={result.windows_total} completed={result.windows_completed} "
+        f"skipped={result.windows_skipped} failed={result.windows_failed}"
+    )
+    print(f"   - Requests attempted: {result.requests_attempted}")
+    print(f"   - Rows upserted: {result.rows_upserted}")
+    for window_key, error in list(result.errors.items())[:10]:
+        print(f"   - Error {window_key}: {error}")
+    _exit_if_opendart_key_exhausted(result, label)
+    if result.errors:
+        sys.exit(1)
+
+
+def _handle_dart_backfill_exchange_notices(args: argparse.Namespace) -> None:
+    """Handle ``collector dart backfill-exchange-notices``."""
+    from collector.kr.service.sync_dart_exchange_notices import quarter_windows
+
+    end = args.to_date or (date.today() - timedelta(days=1))
+    windows = quarter_windows(args.from_date, end)
+    print(
+        f"→ dart backfill-exchange-notices: {args.from_date}~{end} "
+        f"({len(windows)} windows), rate_limit={args.rate_limit_seconds}, "
+        f"max_requests={args.max_requests}, force={args.force}"
+    )
+    _run_exchange_notice_sync(
+        args,
+        windows,
+        mode="backfill",
+        force=args.force,
+        label="OpenDART exchange notice backfill",
+    )
+
+
+def _handle_dart_sync_exchange_notices(args: argparse.Namespace) -> None:
+    """Handle ``collector dart sync-exchange-notices`` (daily incremental)."""
+    from collector.kr.service.sync_dart_exchange_notices import incremental_window
+
+    window = incremental_window(date.today(), args.lookback_days)
+    print(
+        f"→ dart sync-exchange-notices: {window[0]}~{window[1]}, "
+        f"rate_limit={args.rate_limit_seconds}"
+    )
+    _run_exchange_notice_sync(
+        args,
+        [window],
+        mode="incremental",
+        force=True,
+        label="OpenDART exchange notice sync",
+    )
+
+
+def _handle_dart_check_exchange_notices(args: argparse.Namespace) -> None:
+    """Handle ``collector dart check-exchange-notices`` (no HTTP; DB only)."""
+    settings = get_settings()
+
+    from collector.kr.infra.db_postgres.exchange_notice_store import (
+        PostgresExchangeNoticeStore,
+    )
+    from collector.kr.service.sync_dart_exchange_notices import check_exchange_notices
+
+    check = check_exchange_notices(
+        PostgresExchangeNoticeStore(settings.db_dsn),
+        start=args.from_date,
+        through=args.to_date,
+    )
+    print(f"→ dart check-exchange-notices: {check.start}~{check.through}")
+    print("quarter  range                    rows  total_count  pages  problems")
+    for q in check.quarters:
+        pages = (
+            f"{q.window_pages_done}/{q.window_total_page}"
+            if q.window_total_page is not None
+            else "-"
+        )
+        count = q.window_total_count if q.window_total_count is not None else "-"
+        print(
+            f"{q.quarter}   {q.bgn_de}~{q.end_de}  {q.notice_rows:>6}  {count!s:>11}  "
+            f"{pages:>7}  {'; '.join(q.problems) or 'ok'}"
+        )
+    print(f"   - Quarters: {len(check.quarters)}, rows: {check.total_rows}")
+    print(f"   - Missing quarters: {len(check.missing_quarters)} {check.missing_quarters}")
+    print(f"   - Problem quarters: {len(check.problem_quarters)}")
+    for w in check.unfinished_windows:
+        print(
+            f"   - Unfinished window {w.bgn_de}~{w.end_de}: {w.status} "
+            f"pages_done={w.pages_done}/{w.total_page} {w.last_error or ''}"
+        )
+    if not check.ok:
+        sys.exit(1)
+    print("✅ exchange notice coverage ok")
+
+
 def _handle_dart_backfill_xbrl_receipts(args: argparse.Namespace) -> None:
     """Handle ``collector dart backfill-xbrl-receipts``.
 
@@ -3623,6 +3757,96 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     dart_sync_filings.set_defaults(handler=_handle_dart_sync_filings)
+
+    dart_backfill_exchange_notices = dart_sub.add_parser(
+        "backfill-exchange-notices",
+        help=(
+            "Backfill OpenDART 거래소공시 (list.json pblntf_ty=I), market-wide, "
+            "one calendar-quarter window at a time. Resumable."
+        ),
+    )
+    dart_backfill_exchange_notices.add_argument(
+        "--from",
+        dest="from_date",
+        type=_parse_date,
+        default=date(2008, 1, 1),
+        help="First receipt date, YYYY-MM-DD (default: 2008-01-01).",
+    )
+    dart_backfill_exchange_notices.add_argument(
+        "--to",
+        dest="to_date",
+        type=_parse_date,
+        default=None,
+        help="Last receipt date, YYYY-MM-DD (default: yesterday).",
+    )
+    dart_backfill_exchange_notices.add_argument(
+        "--rate-limit-seconds",
+        type=float,
+        default=0.3,
+        help="Seconds between OpenDART requests (default: 0.3).",
+    )
+    dart_backfill_exchange_notices.add_argument(
+        "--max-requests",
+        type=int,
+        default=None,
+        help=(
+            "Stop cleanly after this many HTTP requests (default: unlimited). "
+            "The next run resumes at the unfinished page."
+        ),
+    )
+    dart_backfill_exchange_notices.add_argument(
+        "--force",
+        action="store_true",
+        help="Refetch windows already marked done.",
+    )
+    dart_backfill_exchange_notices.set_defaults(handler=_handle_dart_backfill_exchange_notices)
+
+    dart_sync_exchange_notices = dart_sub.add_parser(
+        "sync-exchange-notices",
+        help="Daily incremental 거래소공시 (recent days window, always refetched).",
+    )
+    dart_sync_exchange_notices.add_argument(
+        "--lookback-days",
+        type=int,
+        default=7,
+        help="Calendar days before today to request (default: 7).",
+    )
+    dart_sync_exchange_notices.add_argument(
+        "--rate-limit-seconds",
+        type=float,
+        default=0.3,
+        help="Seconds between OpenDART requests (default: 0.3).",
+    )
+    dart_sync_exchange_notices.add_argument(
+        "--max-requests",
+        type=int,
+        default=None,
+        help="Stop cleanly after this many HTTP requests (default: unlimited).",
+    )
+    dart_sync_exchange_notices.set_defaults(handler=_handle_dart_sync_exchange_notices)
+
+    dart_check_exchange_notices = dart_sub.add_parser(
+        "check-exchange-notices",
+        help=(
+            "Verify 거래소공시 coverage per quarter (pages, counts, missing days). "
+            "DB only; exits 1 when a quarter is missing or inconsistent."
+        ),
+    )
+    dart_check_exchange_notices.add_argument(
+        "--from",
+        dest="from_date",
+        type=_parse_date,
+        default=date(2008, 1, 1),
+        help="First date to check, YYYY-MM-DD (default: 2008-01-01).",
+    )
+    dart_check_exchange_notices.add_argument(
+        "--to",
+        dest="to_date",
+        type=_parse_date,
+        default=None,
+        help="Last date to check, YYYY-MM-DD (default: yesterday).",
+    )
+    dart_check_exchange_notices.set_defaults(handler=_handle_dart_check_exchange_notices)
 
     dart_backfill_xbrl_receipts = dart_sub.add_parser(
         "backfill-xbrl-receipts",
