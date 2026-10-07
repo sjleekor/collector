@@ -1184,7 +1184,17 @@ def _handle_dart_sync_share_info(args: argparse.Namespace) -> None:
 def _handle_dart_sync_periodic_extras(args: argparse.Namespace) -> None:
     """Handle ``collector dart sync-periodic-extras``."""
     settings = get_settings()
-    bsns_years = list(range(args.start_year, args.end_year + 1))
+    if args.bsns_years:
+        try:
+            bsns_years = [int(value) for value in args.bsns_years.split(",") if value.strip()]
+        except ValueError as exc:
+            print(f"❌ --bsns-years must be comma-separated integers: {exc}", file=sys.stderr)
+            sys.exit(1)
+    elif args.end_year is not None:
+        bsns_years = list(range(args.start_year, args.end_year + 1))
+    else:
+        print("❌ Give --end-year or --bsns-years.", file=sys.stderr)
+        sys.exit(1)
     reprt_codes = [value.strip() for value in args.reprt_codes.split(",") if value.strip()]
     tickers = [value.strip() for value in args.tickers.split(",")] if args.tickers else None
 
@@ -1209,14 +1219,15 @@ def _handle_dart_sync_periodic_extras(args: argparse.Namespace) -> None:
         statements = list(DEFAULT_STATEMENTS)
 
     print(
-        f"→ dart sync-periodic-extras: years={args.start_year}..{args.end_year}, "
+        f"→ dart sync-periodic-extras: years={bsns_years[0]}..{bsns_years[-1]} "
+        f"({len(bsns_years)}), exact_years={args.exact_years}, "
         f"statements={[s.value for s in statements]}, reprt_codes={reprt_codes}, "
         f"tickers={tickers}, scope={args.universe_scope}, force={args.force}"
     )
     # The year thinning is the difference between 162,000 calls and 83,700, so
     # print it rather than leaving the operator to infer it from the totals.
     for statement in statements:
-        years = resolve_target_years(statement, bsns_years)
+        years = resolve_target_years(statement, bsns_years, exact_years=args.exact_years)
         print(f"   - {statement.value}: {len(years)} of {len(bsns_years)} years -> {years}")
 
     from collector.kr.adapters.opendart_periodic_extras.provider import (
@@ -1243,6 +1254,7 @@ def _handle_dart_sync_periodic_extras(args: argparse.Namespace) -> None:
         rate_limit_seconds=args.rate_limit_seconds,
         force=args.force,
         scope=UniverseScope(args.universe_scope),
+        exact_years=args.exact_years,
     )
 
     if result.errors:
@@ -3406,8 +3418,27 @@ def build_parser() -> argparse.ArgumentParser:
     dart_sync_periodic_extras.add_argument(
         "--end-year",
         type=int,
-        required=True,
-        help="Last business year to cover.",
+        default=None,
+        help="Last business year to cover. Required unless --bsns-years is given.",
+    )
+    dart_sync_periodic_extras.add_argument(
+        "--bsns-years",
+        default=None,
+        help=(
+            "Comma-separated business years, e.g. 2020,2022,2024. Replaces "
+            "--start-year/--end-year."
+        ),
+    )
+    dart_sync_periodic_extras.add_argument(
+        "--exact-years",
+        action="store_true",
+        help=(
+            "Request every given year instead of thinning (audit opinion: 6 "
+            "requests for 12 years). A year answered only as 전기/전전기 of a "
+            "later report carries that report's rcept_no, so point-in-time "
+            "use needs each year's own report. Slices already in the ledger "
+            "are still skipped."
+        ),
     )
     dart_sync_periodic_extras.add_argument(
         "--reprt-codes",
