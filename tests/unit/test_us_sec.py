@@ -477,11 +477,15 @@ def test_extract_midas_dedup_keeps_the_fuller_rank_row_for_new_columns_too(tmp_p
 # --- 내부자 거래 (03 §4.10) ---------------------------------------------------
 
 
-def test_insider_url_uses_the_exception_table():
-    """최신 분기 하나가 다른 디렉터리로 갔다 — 규칙만 믿으면 404다 (04 §2.12)."""
-    assert sec.insider_url(2025, 4).endswith("/structureddata/data/"
-                                             "insider-transactions-data-sets/2025q4_form345.zip")
-    assert "datastandardsinnovation" in sec.insider_url(2026, 2)
+def test_insider_url_switches_directory_at_2026q2():
+    """2026q2부터 새 디렉터리다 — 반대쪽 경로는 404다 (2026-10-10 실측)."""
+    base = "https://www.sec.gov/files/{}/data/insider-transactions-data-sets/{}_form345.zip"
+    assert sec.insider_url(2018, 3) == base.format("structureddata", "2018q3")
+    assert sec.insider_url(2026, 1) == base.format("structureddata", "2026q1")
+    assert sec.insider_url(2026, 2) == base.format("datastandardsinnovation", "2026q2")
+    # 예외표 때 404로 "발표 전" 처리되던 분기다
+    assert sec.insider_url(2026, 3) == base.format("datastandardsinnovation", "2026q3")
+    assert sec.insider_url(2027, 1) == base.format("datastandardsinnovation", "2027q1")
 
 
 def _insider_zip(path, *, tag="2018q3"):
