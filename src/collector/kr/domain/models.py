@@ -1079,6 +1079,10 @@ class DartCorpSyncResult:
     unmatched_active_tickers: list[str] = field(default_factory=list)
     unmatched_dart_tickers: list[str] = field(default_factory=list)
     error: str | None = None
+    skipped: bool = False
+    refresh_warning: str | None = None
+    last_real_fetch_at: datetime | None = None
+    last_real_fetch_age_days: int | None = None
 
 
 @dataclass(slots=True)
