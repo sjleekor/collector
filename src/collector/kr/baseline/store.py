@@ -16,7 +16,7 @@ import hashlib
 import json
 import os
 import re
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -75,6 +75,16 @@ def parse_ts(text: str) -> datetime:
     return datetime.strptime(text, _TS_FORMAT).replace(tzinfo=UTC)
 
 
+_SERVICE = re.compile(r"^[a-z0-9_]+$")
+
+
+def check_service(service: str) -> str:
+    """서비스 이름은 ``[a-z0-9_]+``. 원문 경로의 첫 조각이라 ``/``가 들어가면 안 된다."""
+    if not _SERVICE.match(service):
+        raise ValueError(f"서비스 이름은 [a-z0-9_]+ 만 씁니다: {service!r}")
+    return service
+
+
 def request_key_dir(request_key: str) -> Path:
     """요청 키를 디렉터리로. 바꾸지 않고 검사만 한다 — 되돌릴 수 있어야 해서다."""
     segments = request_key.split("/")
@@ -104,6 +114,9 @@ class BaselineStore:
     def __init__(self, base: Path | None = None, *, hook: Callable[[str], None] | None = None):
         self.base = Path(base) if base is not None else self.default_base()
         self.hook = hook
+        #: parquet을 읽을 때마다 ``(상대 경로, 읽은 열)``을 쌓는다. 무엇을 읽는지
+        #: 시험이 확인하려는 것이다(상태를 연도·열 단위로만 읽어야 한다).
+        self.reads: list[tuple[str, tuple[str, ...] | None]] = []
 
     @staticmethod
     def default_base() -> Path:
@@ -172,7 +185,7 @@ class BaselineStore:
         basis: str,
         ext: str,
     ) -> RawRef:
-        directory = Path(RAW_DIR) / request_key_dir(service) / request_key_dir(request_key)
+        directory = Path(RAW_DIR) / check_service(service) / request_key_dir(request_key)
         rel = directory / f"{format_ts(fetched_at)}_{sha256[:12]}.{ext}.gz"
         dest = self.base / rel
         if not dest.exists():
@@ -196,8 +209,13 @@ class BaselineStore:
             return []
         return [json.loads(p.read_text("utf-8")) for p in sorted(directory.glob("*.json"))]
 
-    def committed_paths(self, kind: str, name: str | None = None) -> list[Path]:
-        """완료 manifest가 가리키는 파일 경로. ``kind``는 observation·fetch_log·raw."""
+    def committed_paths(
+        self, kind: str, name: str | None = None, *, year: str | None = None
+    ) -> list[Path]:
+        """완료 manifest가 가리키는 파일 경로. ``kind``는 observation·fetch_log·raw.
+
+        ``year``를 주면 경로의 ``year=YYYY`` 파티션으로 파일을 고른다.
+        """
         out: list[Path] = []
         for manifest in self.manifests():
             for entry in manifest["files"]:
@@ -205,24 +223,52 @@ class BaselineStore:
                     continue
                 if name is not None and entry.get("table", entry.get("service")) != name:
                     continue
+                if year is not None and f"/year={year}/" not in entry["path"]:
+                    continue
                 out.append(self.base / entry["path"])
         return out
 
-    def _read_parquets(self, paths: Iterable[Path], schema: pa.Schema | None) -> pd.DataFrame:
-        tables = [pq.ParquetFile(p).read() for p in paths]  # 경로의 year=를 컬럼으로 읽지 않는다
+    def _read_parquets(
+        self,
+        paths: Iterable[Path],
+        schema: pa.Schema | None,
+        columns: Sequence[str] | None = None,
+    ) -> pd.DataFrame:
+        cols = list(columns) if columns is not None else None
+        tables = []
+        for path in paths:
+            self.reads.append(
+                (path.relative_to(self.base).as_posix(), tuple(cols) if cols else None)
+            )
+            # 경로의 year=를 컬럼으로 읽지 않는다
+            tables.append(pq.ParquetFile(path).read(columns=cols))
         if not tables:
-            return schema.empty_table().to_pandas() if schema is not None else pd.DataFrame()
+            empty = schema.empty_table() if schema is not None else None
+            if empty is not None and cols is not None:
+                empty = empty.select(cols)
+            return empty.to_pandas() if empty is not None else pd.DataFrame()
         return pa.concat_tables(tables).to_pandas()
 
     # ------------------------------------------------------------------- 읽기
 
-    def read_observations(self, spec: TableSpec, view: str = "all") -> pd.DataFrame:
+    def read_observations(
+        self,
+        spec: TableSpec,
+        view: str = "all",
+        *,
+        year: str | None = None,
+        columns: Sequence[str] | None = None,
+    ) -> pd.DataFrame:
         """``all`` 전체 관측 · ``first`` 최초(``obs_seq=1``) · ``latest`` 키별 최신.
 
         ``latest``는 키별 최대 ``obs_seq``이고 그것이 ``absent``면 뺀다.
+        ``year``·``columns``로 읽을 파일과 열을 줄일 수 있다(``columns``는 ``all``만,
+        뷰 계산에 쓰는 ``obs_seq``·``obs_kind``와 키 칸은 알아서 넣지 않는다).
         """
         frame = self._read_parquets(
-            self.committed_paths("observation", spec.name), spec.arrow_schema()
+            self.committed_paths("observation", spec.name, year=year),
+            spec.arrow_schema(),
+            columns,
         )
         if view == "all":
             return frame
@@ -236,8 +282,12 @@ class BaselineStore:
             return top[top["obs_kind"] != OBS_ABSENT].reset_index(drop=True)
         raise ValueError(f"view는 all·first·latest 중 하나입니다: {view!r}")
 
-    def read_fetch_log(self, service: str | None = None) -> pd.DataFrame:
-        return self._read_parquets(self.committed_paths("fetch_log", service), FETCH_LOG_SCHEMA)
+    def read_fetch_log(
+        self, service: str | None = None, columns: Sequence[str] | None = None
+    ) -> pd.DataFrame:
+        return self._read_parquets(
+            self.committed_paths("fetch_log", service), FETCH_LOG_SCHEMA, columns
+        )
 
     # ------------------------------------------------------------ 점검·복구
 
@@ -275,7 +325,7 @@ class BaselineStore:
         중간에 죽으면 이런 파일이 남는다. 다시 받지 않고 원문에서 정규화한다.
         ``fetched_at``은 파일 이름의 시각이다.
         """
-        log = self.read_fetch_log()
+        log = self.read_fetch_log(columns=["raw_path"])
         done = set(log["raw_path"].dropna()) if not log.empty else set()
         root = self.base / RAW_DIR
         found: list[OrphanRaw] = []
