@@ -10,9 +10,20 @@ from collector.kr.domain.models import DartCorp, DartCorpSyncResult, IngestionRu
 from collector.kr.ports.corp_codes import CorpCodeProvider
 from collector.kr.ports.storage import Storage
 from collector.kr.util.pipeline import call_with_retry, should_retry_opendart_result
-from collector.kr.util.time import now_kst
+from collector.kr.util.time import now_kst, to_kst
 
 logger = logging.getLogger(__name__)
+
+# Re-download the corp master once the last real download is this many days old
+# (KST calendar days).  A new listing then reaches DART collection within a
+# week, and corpCode.xml costs one request per day, so refreshing is cheap.
+CORP_MASTER_MAX_AGE_DAYS = 7
+
+# If a refresh fails while the last real download is younger than this, keep the
+# existing master and finish as SUCCESS so the downstream chain keeps running.
+# Longer than an OpenDART maintenance window (about 3 days); beyond it the
+# failure is raised loudly instead of hiding behind a stale master.
+CORP_MASTER_STALE_FAIL_DAYS = 14
 
 
 def _get_executor(provider: object) -> OpenDartRequestExecutor | None:
@@ -29,57 +40,137 @@ def _format_corp_fetch_error(fetch_result: object) -> str:
     return base
 
 
+def _zero_counts() -> dict[str, int]:
+    return {
+        "fetched_records": 0,
+        "matched_active_tickers": 0,
+        "unmatched_active_tickers": 0,
+        "unmatched_dart_tickers": 0,
+        "upsert_updated": 0,
+        "upsert_errors": 0,
+    }
+
+
 def sync_dart_corp_master(
     provider: CorpCodeProvider,
     storage: Storage,
     force: bool = False,
+    max_age_days: int | None = None,
+    stale_fail_days: int | None = None,
 ) -> DartCorpSyncResult:
-    """Synchronise OpenDART corp codes into local storage."""
+    """Synchronise OpenDART corp codes into local storage.
+
+    The master is re-downloaded when the last *real* download (a SUCCESS run with
+    ``fetched_records > 0``) is ``max_age_days`` or more KST calendar days old.
+    Skipped runs and refresh-failed fallback runs do not count as downloads.
+    """
+    if max_age_days is None:
+        max_age_days = CORP_MASTER_MAX_AGE_DAYS
+    if stale_fail_days is None:
+        stale_fail_days = CORP_MASTER_STALE_FAIL_DAYS
+
     run = IngestionRun(
         run_type=RunType.DART_CORP_SYNC,
         started_at=now_kst(),
         status=RunStatus.RUNNING,
-        params={"force": force},
+        params={
+            "force": force,
+            "max_age_days": max_age_days,
+            "stale_fail_days": stale_fail_days,
+        },
     )
     executor = _get_executor(provider)
     if executor is not None:
         run.params["opendart_key_count"] = executor.configured_key_count
     storage.record_run(run)
 
+    last_real_at = None
+    age_days: int | None = None
     try:
         if not force:
-            last_success = storage.get_last_successful_run(RunType.DART_CORP_SYNC)
-            if last_success is not None:
-                logger.info(
-                    "Skipping OpenDART corp master sync; last success at %s (run_id=%s). "
-                    "Pass --force to re-fetch.",
-                    last_success.ended_at,
-                    last_success.run_id,
+            last_real = storage.get_last_successful_run(
+                RunType.DART_CORP_SYNC, positive_count="fetched_records"
+            )
+            if last_real is not None:
+                last_real_at = last_real.ended_at or last_real.started_at
+            if last_real_at is not None:
+                age_days = (run.started_at.date() - to_kst(last_real_at).date()).days
+                if age_days < max_age_days:
+                    logger.info(
+                        "Skipping OpenDART corp master sync; last real fetch at %s "
+                        "(run_id=%s, age=%d days < max_age_days=%d). Pass --force to re-fetch.",
+                        last_real_at,
+                        last_real.run_id if last_real else None,
+                        age_days,
+                        max_age_days,
+                    )
+                    run.ended_at = now_kst()
+                    run.status = RunStatus.SUCCESS
+                    run.counts = {
+                        "skipped_existing": 1,
+                        **_zero_counts(),
+                        "last_real_fetch_age_days": age_days,
+                    }
+                    if executor is not None:
+                        run.counts.update(executor.snapshot_metrics())
+                    storage.record_run(run)
+                    return DartCorpSyncResult(
+                        skipped=True,
+                        last_real_fetch_at=last_real_at,
+                        last_real_fetch_age_days=age_days,
+                    )
+
+        can_fall_back = (
+            not force
+            and last_real_at is not None
+            and age_days is not None
+            and age_days < stale_fail_days
+        )
+
+        try:
+            fetch_result = call_with_retry(
+                provider.fetch_corp_codes,
+                request_label="corp_code_master",
+                logger_instance=logger,
+                should_retry_result=should_retry_opendart_result,
+            )
+            fetch_error = _format_corp_fetch_error(fetch_result) if fetch_result.error else None
+        except Exception as fetch_exc:
+            if not can_fall_back:
+                raise
+            fetch_result = None
+            fetch_error = f"{type(fetch_exc).__name__}: {fetch_exc}"
+            logger.warning("OpenDART corp fetch raised: %s", fetch_error)
+
+        if fetch_error:
+            if can_fall_back:
+                assert last_real_at is not None and age_days is not None
+                logger.warning(
+                    "OpenDART corp refresh failed; keeping master from %s "
+                    "(age=%d days < stale_fail_days=%d): %s",
+                    last_real_at,
+                    age_days,
+                    stale_fail_days,
+                    fetch_error,
                 )
                 run.ended_at = now_kst()
                 run.status = RunStatus.SUCCESS
                 run.counts = {
-                    "skipped_existing": 1,
-                    "fetched_records": 0,
-                    "matched_active_tickers": 0,
-                    "unmatched_active_tickers": 0,
-                    "unmatched_dart_tickers": 0,
-                    "upsert_updated": 0,
-                    "upsert_errors": 0,
+                    **_zero_counts(),
+                    "refresh_failed": 1,
+                    "last_real_fetch_age_days": age_days,
                 }
                 if executor is not None:
                     run.counts.update(executor.snapshot_metrics())
+                run.error_summary = fetch_error
                 storage.record_run(run)
-                return DartCorpSyncResult()
-
-        fetch_result = call_with_retry(
-            provider.fetch_corp_codes,
-            request_label="corp_code_master",
-            logger_instance=logger,
-            should_retry_result=should_retry_opendart_result,
-        )
-        if fetch_result.error:
-            raise RuntimeError(_format_corp_fetch_error(fetch_result))
+                return DartCorpSyncResult(
+                    refresh_warning=fetch_error,
+                    last_real_fetch_at=last_real_at,
+                    last_real_fetch_age_days=age_days,
+                )
+            raise RuntimeError(fetch_error)
+        assert fetch_result is not None
 
         active_stocks = storage.get_active_stocks()
         active_stocks_by_ticker = {stock.ticker: stock for stock in active_stocks}

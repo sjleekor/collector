@@ -855,8 +855,38 @@ def _dart_xbrl_actual_attempt_estimate(
     return attempts
 
 
+def _non_negative_int(value: str) -> int:
+    """argparse type: integer >= 0."""
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError(f"must be >= 0, got {parsed}")
+    return parsed
+
+
+def _resolve_corp_refresh_days(args: argparse.Namespace) -> tuple[int, int]:
+    """Resolve ``--max-age-days``/``--stale-fail-days`` against the module defaults."""
+    from collector.kr.service.sync_dart_corp import (
+        CORP_MASTER_MAX_AGE_DAYS,
+        CORP_MASTER_STALE_FAIL_DAYS,
+    )
+
+    max_age_days = CORP_MASTER_MAX_AGE_DAYS if args.max_age_days is None else args.max_age_days
+    stale_fail_days = (
+        CORP_MASTER_STALE_FAIL_DAYS if args.stale_fail_days is None else args.stale_fail_days
+    )
+    if max_age_days >= stale_fail_days:
+        print(
+            f"❌ --max-age-days ({max_age_days}) must be less than "
+            f"--stale-fail-days ({stale_fail_days}).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    return max_age_days, stale_fail_days
+
+
 def _handle_dart_sync_corp(args: argparse.Namespace) -> None:
     """Handle ``collector dart sync-corp``."""
+    max_age_days, stale_fail_days = _resolve_corp_refresh_days(args)
     settings = get_settings()
 
     print("→ dart sync-corp: downloading OpenDART corp master and validating ticker mappings")
@@ -864,6 +894,7 @@ def _handle_dart_sync_corp(args: argparse.Namespace) -> None:
     from collector.kr.adapters.opendart_corp.provider import OpenDartCorpCodeProvider
     from collector.kr.infra.db_postgres.repositories import PostgresStorage
     from collector.kr.service.sync_dart_corp import sync_dart_corp_master
+    from collector.kr.util.time import to_kst
 
     try:
         request_executor = _build_opendart_request_executor()
@@ -873,11 +904,34 @@ def _handle_dart_sync_corp(args: argparse.Namespace) -> None:
 
     provider = OpenDartCorpCodeProvider(request_executor=request_executor)
     storage = PostgresStorage(settings.db_dsn)
-    result = sync_dart_corp_master(provider=provider, storage=storage, force=args.force)
+    result = sync_dart_corp_master(
+        provider=provider,
+        storage=storage,
+        force=args.force,
+        max_age_days=max_age_days,
+        stale_fail_days=stale_fail_days,
+    )
 
     if result.error:
         print(f"❌ OpenDART corp sync failed: {result.error}", file=sys.stderr)
         sys.exit(1)
+
+    if result.skipped:
+        print(
+            f"✅ OpenDART corp sync skipped: last real fetch "
+            f"{result.last_real_fetch_at} (age {result.last_real_fetch_age_days} days "
+            f"< {max_age_days})."
+        )
+        return
+
+    if result.refresh_warning:
+        last_date = to_kst(result.last_real_fetch_at).date() if result.last_real_fetch_at else "?"
+        print(
+            f"⚠ OpenDART corp refresh failed; keeping master from {last_date} "
+            f"(age {result.last_real_fetch_age_days} days < {stale_fail_days}): "
+            f"{result.refresh_warning}"
+        )
+        return
 
     print("✅ OpenDART corp sync completed.")
     print(f"   - Total records fetched: {result.total_records}")
@@ -3683,7 +3737,21 @@ def build_parser() -> argparse.ArgumentParser:
     dart_sync_corp.add_argument(
         "--force",
         action="store_true",
-        help="Re-download even if a previous successful corp sync is recorded.",
+        help="Re-download regardless of the last real download's age.",
+    )
+    dart_sync_corp.add_argument(
+        "--max-age-days",
+        type=_non_negative_int,
+        default=None,
+        help="Re-download when the last real download is at least this many KST days old "
+        "(default: 7; 0 downloads every run).",
+    )
+    dart_sync_corp.add_argument(
+        "--stale-fail-days",
+        type=_non_negative_int,
+        default=None,
+        help="If a refresh fails, keep the old master and succeed while it is younger than "
+        "this many days; otherwise fail (default: 14).",
     )
     dart_sync_corp.set_defaults(handler=_handle_dart_sync_corp)
 

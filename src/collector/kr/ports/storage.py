@@ -194,8 +194,20 @@ class Storage(Protocol):
         """
         ...
 
-    def get_last_successful_run(self, run_type: RunType) -> IngestionRun | None:
-        """Return the most recent SUCCESS-status run for the given run_type, or None."""
+    def get_last_successful_run(
+        self,
+        run_type: RunType,
+        *,
+        positive_count: str | None = None,
+    ) -> IngestionRun | None:
+        """Return the most recent SUCCESS-status run for the given run_type, or None.
+
+        Args:
+            run_type: Run type to look up.
+            positive_count: When given, only runs whose ``counts[positive_count]``
+                is a positive integer are considered (e.g. ``"fetched_records"``
+                to skip runs that did not actually download anything).
+        """
         ...
 
     def get_existing_dart_financial_statement_keys(
