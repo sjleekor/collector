@@ -12,6 +12,7 @@ from datetime import date, datetime, timedelta
 import pandas as pd
 
 from collector.kr.baseline.store import BaselineStore
+from collector.kr.util.time import KST
 
 #: 이 날짜 상태나 순자산 0이 있으면, 아직 발표 전일 수 있어 다시 받는다.
 PENDING_DAY_KINDS = frozenset({"no_price", "empty", "partial"})
@@ -80,6 +81,52 @@ def bas_dd_request_key(day: date) -> str:
     return f"bas_dd={day:%Y%m%d}"
 
 
+def _latest_ok_rows(store: BaselineStore, service: str) -> dict[str, pd.Series]:
+    """요청 키별 **성공한 마지막** 요청 기록."""
+    log = store.read_fetch_log(service)
+    latest: dict[str, pd.Series] = {}
+    if not log.empty:
+        ok = log[log["result"] != "failed"].sort_values("fetched_at")
+        for _, row in ok.drop_duplicates("request_key", keep="last").iterrows():
+            latest[row["request_key"]] = row
+    return latest
+
+
+def fill_plan(
+    store: BaselineStore,
+    service: str,
+    start: date,
+    end: date,
+    *,
+    window_weekdays: int = DEFAULT_WINDOW_WEEKDAYS,
+) -> tuple[list[date], list[date]]:
+    """``(기록 없는 평일, 아직 대기인 평일)``. 둘을 합친 것이 ``fill`` 대상이다.
+
+    날짜마다 성공한 마지막 요청을 본다. 있으면 **그 요청을 받은 날(KST)** 기준으로
+    ``is_pending``을 따진다. 대기 창 안에서 받은 마지막 기록이 여전히 비어 있으면
+    한 번 더 받아야 하고, 창을 넘겨 받고도 비어 있으면 확정이다. 오늘이 아니라
+    마지막으로 받은 날을 기준으로 삼으므로, 잡이 멈춰 있던 동안의 상태를 확정으로
+    착각하지 않는다.
+    """
+    latest = _latest_ok_rows(store, service)
+    missing: list[date] = []
+    pending: list[date] = []
+    for day in iter_weekdays(start, end):
+        row = latest.get(bas_dd_request_key(day))
+        if row is None:
+            missing.append(day)
+        elif is_pending(
+            row["day_kind"],
+            _none_if_na(row["netasst_zero_rows"]),
+            _none_if_na(row["required_missing"]),
+            day,
+            row["fetched_at"].tz_convert(KST).date(),
+            window_weekdays,
+        ):
+            pending.append(day)
+    return missing, pending
+
+
 def fill_dates(
     store: BaselineStore,
     service: str,
@@ -88,32 +135,9 @@ def fill_dates(
     *,
     window_weekdays: int = DEFAULT_WINDOW_WEEKDAYS,
 ) -> list[date]:
-    """``fill`` 모드 대상 — 범위의 평일 중 완료 관측이 없거나 "대기"인 날짜.
-
-    날짜마다 **성공한 마지막 요청**을 본다. 없으면(실패만 있어도) 받는다. 있으면
-    그 요청을 받은 날(``fetched_at``의 UTC 날짜가 아니라 기록된 날짜) 기준으로
-    ``is_pending``이 참일 때만 다시 받는다. 대기 창 안에서 받은 마지막 기록이
-    여전히 비어 있으면 한 번 더 받아야 하고, 창을 넘겨 받고도 비어 있으면 확정이다.
-    """
-    log = store.read_fetch_log(service)
-    latest: dict[str, pd.Series] = {}
-    if not log.empty:
-        ok = log[log["result"] != "failed"].sort_values("fetched_at")
-        for _, row in ok.drop_duplicates("request_key", keep="last").iterrows():
-            latest[row["request_key"]] = row
-    out: list[date] = []
-    for day in iter_weekdays(start, end):
-        row = latest.get(bas_dd_request_key(day))
-        if row is None or is_pending(
-            row["day_kind"],
-            _none_if_na(row["netasst_zero_rows"]),
-            _none_if_na(row["required_missing"]),
-            day,
-            row["fetched_at"].date(),
-            window_weekdays,
-        ):
-            out.append(day)
-    return out
+    """``fill`` 모드 대상 — 범위의 평일 중 완료 관측이 없거나 "대기"인 날짜."""
+    missing, pending = fill_plan(store, service, start, end, window_weekdays=window_weekdays)
+    return sorted(missing + pending)
 
 
 def completed_request_keys(store: BaselineStore, service: str, run_id: str) -> set[str]:

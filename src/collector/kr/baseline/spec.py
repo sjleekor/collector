@@ -40,6 +40,14 @@ OBS_VALUE = "value"
 OBS_ABSENT = "absent"
 FETCHED_AT_BASES = ("response", "file_mtime")
 
+_ARROW_TYPES: dict[str, pa.DataType] = {
+    "float64": pa.float64(),
+    "int64": pa.int64(),
+    "date32": pa.date32(),
+    "bool": pa.bool_(),
+    "string": pa.string(),
+}
+
 _SEP = "\x1f"  # 단위 구분자. 원천 값에 나오지 않는다.
 _NULL = "\x00N"  # None 표시. 빈 문자열("")과 구분한다.
 
@@ -53,7 +61,8 @@ class TableSpec:
         key_columns: 업무 키. 값은 문자열이다(``0184E0`` 같은 코드가 있다).
         source_columns: 원천 칸. 원문 문자열 그대로이고 ``row_hash``의 입력이다.
             **이 순서가 해시 순서**라서 바꾸면 기존 관측과 전부 달라 보인다.
-        numeric_columns: 원문에서 바꾼 숫자 칸(float64). 해시에는 안 들어간다 —
+        parsed_columns: 원문에서 바꾼 칸의 ``{이름: 형식}``. 형식은 ``float64``·
+            ``int64``·``date32``·``bool``·``string``. 해시에는 안 들어간다 —
             같은 원문에서 나오는 파생값이라서다.
         date_column: ``year=`` 파티션을 정하는 키 칸. 값은 ``YYYY…``로 시작한다.
         schema_version: 칸 구성을 바꿀 때 올리는 기록용 번호.
@@ -63,7 +72,7 @@ class TableSpec:
     key_columns: tuple[str, ...]
     source_columns: tuple[str, ...]
     date_column: str
-    numeric_columns: tuple[str, ...] = ()
+    parsed_columns: Mapping[str, str] = field(default_factory=dict)
     schema_version: int = 1
     _all: tuple[str, ...] = field(init=False, repr=False, compare=False, default=())
 
@@ -72,16 +81,23 @@ class TableSpec:
             raise ValueError(f"{self.name}: key_columns가 비었습니다")
         if self.date_column not in self.key_columns:
             raise ValueError(f"{self.name}: date_column은 key_columns 안에 있어야 합니다")
-        declared = [*self.key_columns, *self.source_columns, *self.numeric_columns]
+        object.__setattr__(self, "parsed_columns", dict(self.parsed_columns))
+        unknown_types = set(self.parsed_columns.values()) - set(_ARROW_TYPES)
+        if unknown_types:
+            raise ValueError(f"{self.name}: 모르는 형식입니다: {sorted(unknown_types)}")
+        declared = [*self.key_columns, *self.source_columns, *self.parsed_columns]
         bad = set(declared) & (set(PROVENANCE_COLUMNS) | FORBIDDEN_COLUMNS)
         if bad:
             raise ValueError(f"{self.name}: 예약된 컬럼 이름을 씁니다: {sorted(bad)}")
-        if set(self.numeric_columns) & (set(self.key_columns) | set(self.source_columns)):
-            raise ValueError(f"{self.name}: numeric_columns가 다른 칸과 겹칩니다")
+        if set(self.parsed_columns) & (set(self.key_columns) | set(self.source_columns)):
+            raise ValueError(f"{self.name}: parsed_columns가 다른 칸과 겹칩니다")
+        names = list(dict.fromkeys([*self.key_columns, *self.source_columns, *self.parsed_columns]))
+        if len({c.lower() for c in names}) != len(names):
+            raise ValueError(f"{self.name}: 대소문자만 다른 칸이 있습니다 (DuckDB가 구분하지 않음)")
         # 키가 원천 칸에 없어도 된다(요청에서 온 bas_dd 등). 있으면 중복 없이 한 번만 둔다.
         ordered = list(self.key_columns)
         ordered += [c for c in self.source_columns if c not in self.key_columns]
-        ordered += list(self.numeric_columns)
+        ordered += list(self.parsed_columns)
         object.__setattr__(self, "_all", tuple(ordered))
 
     @property
@@ -92,7 +108,7 @@ class TableSpec:
     def arrow_schema(self) -> pa.Schema:
         fields: list[pa.Field] = []
         for column in self._all:
-            kind = pa.float64() if column in self.numeric_columns else pa.string()
+            kind = _ARROW_TYPES[self.parsed_columns.get(column, "string")]
             fields.append(pa.field(column, kind))
         fields += [
             pa.field("fetched_at", pa.timestamp("us", tz="UTC")),

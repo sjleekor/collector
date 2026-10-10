@@ -26,10 +26,10 @@ from collector.kr.baseline import (
 
 SPEC = TableSpec(
     name="t_daily",
-    key_columns=("bas_dd", "isu_cd"),
+    key_columns=("BAS_DD", "ISU_CD"),
     source_columns=("ISU_CD", "CLSPRC", "NETASST"),
-    date_column="bas_dd",
-    numeric_columns=("clsprc_num",),
+    date_column="BAS_DD",
+    parsed_columns={"clsprc_num": "float64"},
 )
 SVC = "svc"
 T0 = datetime(2026, 10, 12, 9, 0, tzinfo=UTC)
@@ -37,8 +37,7 @@ T0 = datetime(2026, 10, 12, 9, 0, tzinfo=UTC)
 
 def _row(day: str, code: str, price: str | None, netasst: str | None = "100") -> dict:
     return {
-        "bas_dd": day,
-        "isu_cd": code,
+        "BAS_DD": day,
         "ISU_CD": code,
         "CLSPRC": price,
         "NETASST": netasst,
@@ -47,7 +46,7 @@ def _row(day: str, code: str, price: str | None, netasst: str | None = "100") ->
 
 
 def _parsed(day: str, rows: list[dict], **kw) -> ParsedResponse:
-    return ParsedResponse(SPEC, rows, {"bas_dd": day}, **kw)
+    return ParsedResponse(SPEC, rows, {"BAS_DD": day}, **kw)
 
 
 def _put(writer: BaselineWriter, day: str, rows: list[dict], at: datetime, **kw) -> str:
@@ -172,8 +171,8 @@ def test_no_duplicate_key_and_seq_pairs_across_batches_and_attempts(store: Basel
     )
     w2.flush()
     obs = store.read_observations(SPEC, "all")
-    assert not obs.duplicated(["bas_dd", "isu_cd", "obs_seq"]).any()
-    for _, grp in obs.groupby(["bas_dd", "isu_cd"]):
+    assert not obs.duplicated(["BAS_DD", "ISU_CD", "obs_seq"]).any()
+    for _, grp in obs.groupby(["BAS_DD", "ISU_CD"]):
         assert sorted(grp["obs_seq"]) == list(range(1, len(grp) + 1))
     assert len(list((store.base / "_manifest").glob("*.json"))) == 5  # 4 묶음 + 1 새 시도
 
@@ -201,11 +200,11 @@ def test_a_vanished_key_becomes_absent_but_stays_in_the_first_view(store: Baseli
     assert _put(w, day, [_row(day, "A", "10")], T0 + timedelta(days=2)) == "same"
     w.flush()
     obs = store.read_observations(SPEC, "all")
-    b = obs[obs["isu_cd"] == "B"].sort_values("obs_seq")
+    b = obs[obs["ISU_CD"] == "B"].sort_values("obs_seq")
     assert list(b["obs_kind"]) == ["value", "absent"]
     assert b.iloc[1][["CLSPRC", "NETASST"]].isna().all()
-    assert list(store.read_observations(SPEC, "latest")["isu_cd"]) == ["A"]
-    assert set(store.read_observations(SPEC, "first")["isu_cd"]) == {"A", "B"}
+    assert list(store.read_observations(SPEC, "latest")["ISU_CD"]) == ["A"]
+    assert set(store.read_observations(SPEC, "first")["ISU_CD"]) == {"A", "B"}
     # 다시 나타나면 새 관측
     w2 = _writer(store)
     assert (
@@ -213,7 +212,7 @@ def test_a_vanished_key_becomes_absent_but_stays_in_the_first_view(store: Baseli
         == "new_obs"
     )
     w2.flush()
-    assert set(store.read_observations(SPEC, "latest")["isu_cd"]) == {"A", "B"}
+    assert set(store.read_observations(SPEC, "latest")["ISU_CD"]) == {"A", "B"}
 
 
 def test_incomplete_or_empty_responses_are_not_evidence_of_absence(store: BaselineStore) -> None:
@@ -225,7 +224,7 @@ def test_incomplete_or_empty_responses_are_not_evidence_of_absence(store: Baseli
     # 다른 날짜의 키는 범위 밖이라 영향이 없다
     _put(w, "20261012", [_row("20261012", "A", "1")], T0 + timedelta(days=3))
     w.flush()
-    assert set(store.read_observations(SPEC, "latest")["isu_cd"]) == {"A", "B"}
+    assert set(store.read_observations(SPEC, "latest")["ISU_CD"]) == {"A", "B"}
     assert (store.read_observations(SPEC, "all")["obs_kind"] == "value").all()
 
 
@@ -238,7 +237,7 @@ def test_a_response_without_scope_or_with_duplicate_keys_is_refused(store: Basel
             service=SVC,
             request_key="bas_dd=20261009",
             raw=raw,
-            parsed=ParsedResponse(SPEC, [row, row], {"bas_dd": "20261009"}),
+            parsed=ParsedResponse(SPEC, [row, row], {"BAS_DD": "20261009"}),
         )
     with pytest.raises(ValueError):
         w.add_response(
@@ -295,10 +294,10 @@ def test_a_crash_at_any_stage_loses_and_duplicates_nothing(stage: str, tmp_path:
     assert w2.recover_orphans(_parse_orphan) == 1
     w2.flush()
     obs = fresh.read_observations(SPEC, "all")
-    assert sorted(obs["isu_cd"]) == ["A", "B"] and list(obs["obs_seq"]) == [1, 1]
+    assert sorted(obs["ISU_CD"]) == ["A", "B"] and list(obs["obs_seq"]) == [1, 1]
     assert (obs["fetched_at"] == T0).all()  # 파일 이름의 시각
     assert fresh.find_orphan_raw() == []
-    assert not obs.duplicated(["bas_dd", "isu_cd", "obs_seq"]).any()
+    assert not obs.duplicated(["BAS_DD", "ISU_CD", "obs_seq"]).any()
     assert len(fresh.read_fetch_log()) == 1
 
     # 한 번 더 이어도 달라지지 않는다
