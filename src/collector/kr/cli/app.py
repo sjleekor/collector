@@ -2530,6 +2530,171 @@ def _handle_index_sync(args: argparse.Namespace) -> None:
         print("✅ Index sync completed successfully.")
 
 
+# ---------------------------------------------------------------------------
+# R-4 기준선 수집 (krx-baseline · seibro-dist)
+# ---------------------------------------------------------------------------
+
+
+def _baseline_store() -> object:
+    """``$STOCK_DATA_ROOT/kr/raw/krx_baseline``. 환경변수가 없으면 종료 코드 2."""
+    from collector.kr.baseline import BaselineStore
+
+    try:
+        return BaselineStore()
+    except RuntimeError as exc:
+        print(f"오류: {exc}", file=sys.stderr)
+        sys.exit(2)
+
+
+def _print_krx_baseline_result(result: object) -> None:
+    print(
+        f"   - {result.service}: 계획 {result.dates_planned}일, 시도 {result.dates_attempted}일, "
+        f"새 관측 {result.new_obs}, 같음 {result.same}, 실패 {result.failures}, "
+        f"HTTP {result.http_requests}, 원문 복구 {result.recovered}"
+    )
+    if result.stopped_by:
+        print(f"     멈춘 이유: {result.stopped_by}")
+    for key, message in list(result.errors.items())[:5]:
+        print(f"     {key}: {message}", file=sys.stderr)
+
+
+def _exit_for_krx_baseline(results: list) -> None:
+    """한도 소진·인증 오류·연속 실패·날짜 실패가 있으면 0이 아닌 종료 코드."""
+    if any(r.fatal for r in results):
+        print(
+            "오류: 한도 소진이나 인증 문제로 멈췄습니다. 확정한 곳까지는 저장했습니다.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if any(r.failures or r.stopped_by == "consecutive_failures" for r in results):
+        print("경고: 받지 못한 날짜가 있습니다. 다음 실행이 다시 받습니다.", file=sys.stderr)
+        sys.exit(1)
+    print("완료.")
+
+
+def _handle_krx_baseline_sync(args: argparse.Namespace) -> None:
+    """``collector krx-baseline sync`` — 최근 평일 20일 창의 빈·대기 날짜만."""
+    from collector.kr.service import krx_baseline as kb
+
+    try:
+        services = kb.resolve_services(args.services)
+    except ValueError as exc:
+        print(f"오류: {exc}", file=sys.stderr)
+        sys.exit(1)
+    client = _build_krx_openapi_client(get_settings())
+    print(
+        f"-> krx-baseline sync: services={[s.service for s in services]}, "
+        f"max_calls={args.max_calls}"
+    )
+    results = kb.sync(
+        store=_baseline_store(),
+        client=client,
+        services=services,
+        max_calls=args.max_calls,
+        max_consecutive_failures=args.max_consecutive_failures,
+    )
+    for result in results:
+        _print_krx_baseline_result(result)
+    _exit_for_krx_baseline(results)
+
+
+def _handle_krx_baseline_backfill(args: argparse.Namespace) -> None:
+    """``collector krx-baseline backfill`` — fill 또는 reobserve."""
+    from collector.kr.service import krx_baseline as kb
+
+    if args.mode == "reobserve" and not args.run_id:
+        print("오류: reobserve는 --run-id가 필요합니다.", file=sys.stderr)
+        sys.exit(1)
+    try:
+        (service,) = kb.resolve_services(args.service)
+    except ValueError as exc:
+        print(f"오류: {exc}", file=sys.stderr)
+        sys.exit(1)
+    client = _build_krx_openapi_client(get_settings())
+    print(
+        f"-> krx-baseline backfill: service={service.service}, mode={args.mode}, "
+        f"start={args.start}, end={args.end}, run_id={args.run_id}, max_calls={args.max_calls}"
+    )
+    result = kb.backfill(
+        store=_baseline_store(),
+        client=client,
+        service=service,
+        mode=args.mode,
+        start=args.start,
+        end=args.end,
+        run_id=args.run_id,
+        max_calls=args.max_calls,
+        max_consecutive_failures=args.max_consecutive_failures,
+    )
+    _print_krx_baseline_result(result)
+    if result.stopped_by == "max_calls":
+        print("--max-calls에서 멈췄습니다. 같은 명령을 다시 돌리면 이어 받습니다.")
+    _exit_for_krx_baseline([result])
+
+
+def _handle_krx_baseline_import_research(args: argparse.Namespace) -> None:
+    """``collector krx-baseline import-research`` — ETF 조사 사본(HTTP 0)."""
+    from collector.kr.service import krx_baseline as kb
+
+    print(f"-> krx-baseline import-research: path={args.path}, force={args.force}")
+    try:
+        result = kb.import_research(
+            store=_baseline_store(),
+            path=Path(args.path),
+            expect_manifest_sha256=args.expect_manifest_sha256,
+            force=args.force,
+        )
+    except kb.BaselineImportError as exc:
+        print(f"오류: {exc}", file=sys.stderr)
+        sys.exit(1)
+    print(
+        f"   - 파일 {result.files_total}, 들임 {result.imported}, 이미 끝냄 {result.skipped_done}, "
+        f"원문 복구 {result.recovered}, 날짜 상태 불일치 {result.day_kind_mismatch}"
+    )
+    print("완료.")
+
+
+def _handle_krx_baseline_verify(args: argparse.Namespace) -> None:
+    """``collector krx-baseline verify`` — 계획 §8 검사. 실패가 있으면 종료 코드 1."""
+    from collector.kr.service.krx_baseline_verify import verify
+    from collector.kr.util.time import now_kst
+
+    services = [s.strip() for s in args.service.split(",") if s.strip()] if args.service else None
+    report = verify(
+        _baseline_store(),
+        today=now_kst().date(),
+        start=args.start,
+        end=args.end,
+        services=services,
+    )
+    print(report.render())
+    if not report.ok:
+        sys.exit(1)
+
+
+def _handle_seibro_dist_sync(args: argparse.Namespace) -> None:
+    """``collector seibro-dist sync`` — 주간 창, ``--full``이면 전체 재확인."""
+    from collector.kr.adapters.seibro_distribution import SeibroClient
+    from collector.kr.service import seibro_dist
+
+    store = _baseline_store()
+    result = seibro_dist.sync(store=store, client=SeibroClient(), env=os.environ, full=args.full)
+    if not result.enabled:
+        print("SEIBro 수집이 꺼져 있어(SDC_SEIBRO_ENABLED=0) 요청 없이 끝냅니다.")
+        return
+    print(
+        f"-> seibro-dist sync: 창 {result.start}~{result.end} (전체 {result.full}), "
+        f"완료 {result.complete}, 행 {result.rows}, 응답 {result.responses}, "
+        f"HTTP {result.http_requests}, 새 관측 {result.new_obs}"
+    )
+    for message in result.errors:
+        print(f"   오류: {message}", file=sys.stderr)
+    if not result.complete:
+        print("창이 미완료입니다. 다음 실행이 마지막 완료 창부터 다시 받습니다.", file=sys.stderr)
+        sys.exit(1)
+    print("완료.")
+
+
 def _handle_validate(args: argparse.Namespace) -> None:
     """Handle ``collector validate``."""
     settings = get_settings()
@@ -4300,6 +4465,83 @@ def build_parser() -> argparse.ArgumentParser:
         help="Re-fetch dates that are already stored.",
     )
     index_sync.set_defaults(handler=_handle_index_sync)
+
+    # -- krx-baseline (R-4 기준선 수집) ------------------------------------------
+    kb_parser = subparsers.add_parser(
+        "krx-baseline",
+        help="R-4 baseline: ETF daily, bond index, KOSPI200 TR (KRX Open API) into the lake.",
+    )
+    kb_sub = kb_parser.add_subparsers(dest="krx_baseline_command", required=True)
+
+    def _add_baseline_service_arg(sub: argparse.ArgumentParser, *, plural: bool) -> None:
+        sub.add_argument(
+            "--services" if plural else "--service",
+            default="" if plural else "etf_bydd_trd",
+            help=(
+                "etf_bydd_trd, bon_dd_trd, drvprod_dd_trd"
+                + (" (comma-separated; default all)" if plural else "")
+            ),
+        )
+
+    kb_sync = kb_sub.add_parser(
+        "sync",
+        help="Recent 20 weekdays only: fetch dates with no completed record or still pending.",
+    )
+    _add_baseline_service_arg(kb_sync, plural=True)
+    kb_sync.add_argument(
+        "--max-calls",
+        type=int,
+        default=60,
+        help="Stop cleanly after this many real HTTP requests (retries and rotations count).",
+    )
+    kb_sync.add_argument("--max-consecutive-failures", type=int, default=5)
+    kb_sync.set_defaults(handler=_handle_krx_baseline_sync)
+
+    kb_backfill = kb_sub.add_parser("backfill", help="Backfill one service over a date range.")
+    _add_baseline_service_arg(kb_backfill, plural=False)
+    kb_backfill.add_argument("--mode", choices=("fill", "reobserve"), default="fill")
+    kb_backfill.add_argument("--start", type=_parse_date, default=None)
+    kb_backfill.add_argument("--end", type=_parse_date, default=None)
+    kb_backfill.add_argument(
+        "--run-id", default=None, help="Required for reobserve: resume is judged by this id."
+    )
+    kb_backfill.add_argument(
+        "--max-calls",
+        type=int,
+        default=None,
+        help="Stop cleanly after this many real HTTP requests (not dates).",
+    )
+    kb_backfill.add_argument("--max-consecutive-failures", type=int, default=5)
+    kb_backfill.set_defaults(handler=_handle_krx_baseline_backfill)
+
+    kb_import = kb_sub.add_parser(
+        "import-research", help="Import the ETF research copy as obs_seq=1 (no HTTP)."
+    )
+    kb_import.add_argument("--path", required=True, help="Directory with manifest_files.tsv.")
+    kb_import.add_argument("--expect-manifest-sha256", required=True)
+    kb_import.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help="Import even if another run_id already has completed records.",
+    )
+    kb_import.set_defaults(handler=_handle_krx_baseline_import_research)
+
+    kb_verify = kb_sub.add_parser("verify", help="Check the baseline lake (plan 04 section 8).")
+    kb_verify.add_argument("--start", type=_parse_date, default=None)
+    kb_verify.add_argument("--end", type=_parse_date, default=None)
+    kb_verify.add_argument("--service", default="", help="Comma-separated; default all.")
+    kb_verify.set_defaults(handler=_handle_krx_baseline_verify)
+
+    seibro_parser = subparsers.add_parser(
+        "seibro-dist", help="SEIBro ETF distribution (분배금) collection."
+    )
+    seibro_sub = seibro_parser.add_subparsers(dest="seibro_dist_command", required=True)
+    seibro_sync = seibro_sub.add_parser(
+        "sync", help="Weekly window from the last complete window; --full re-checks everything."
+    )
+    seibro_sync.add_argument("--full", action="store_true", default=False)
+    seibro_sync.set_defaults(handler=_handle_seibro_dist_sync)
 
     # -- profile --------------------------------------------------------------
     profile_parser = subparsers.add_parser(
