@@ -170,6 +170,11 @@ flowchart TD
 
 표에 없는 갈래는 유예가 없다 — 404가 곧 실패다. 유예 값은 코드 상수라 바꾸려면 릴리스가 필요하다.
 
+**유예는 경로가 바뀐 것도 그동안 가린다.** 내부자 2026q3는 SEC가 2026-10-07에 새 디렉터리(`datastandardsinnovation`)에만
+올려서 규칙 경로가 404였고, `sec_quarterly`는 이것을 "발표 전"으로 넘겼다(2026-10-09 목록 페이지로 발견). `note`의
+"발표 전인 분기"에 평소 지연(위 표 "보통")보다 오래 남은 분기가 있으면 목록 페이지의 `href`를 본다. 내부자는
+`v0.17.0`부터 2026q2 이후를 새 디렉터리로 만든다(`INSIDER_NEW_DIR_FROM`, `src/collector/us/sources/sec.py`).
+
 ## Wrapper와 lock/throttle
 
 대부분의 daily wrapper는 `bin/lib/sdc-wrapper.sh`를 source하고 `docker compose run --rm collector ...`를 호출한다. wrapper의 주요 실행 함수는 아래와 같다.
