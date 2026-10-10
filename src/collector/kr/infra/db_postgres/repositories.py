@@ -590,6 +590,10 @@ class PostgresStorage:
                     for record in records
                 ]
 
+                # market keeps the stored value when the record has none: delisted
+                # companies arrive as market=None, and modeler's metric_vintages corp
+                # CTE filters on market IS NOT NULL (no is_active filter, to avoid
+                # survivor bias), so overwriting would drop them from the marts.
                 _execute_values_counted(
                     cur,
                     """
@@ -608,7 +612,7 @@ class PostgresStorage:
                     ON CONFLICT (corp_code) DO UPDATE SET
                         ticker = EXCLUDED.ticker,
                         corp_name = EXCLUDED.corp_name,
-                        market = EXCLUDED.market,
+                        market = COALESCE(EXCLUDED.market, dart_corp_master.market),
                         stock_name = EXCLUDED.stock_name,
                         modify_date = EXCLUDED.modify_date,
                         is_active = EXCLUDED.is_active,

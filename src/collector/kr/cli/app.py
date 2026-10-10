@@ -843,8 +843,8 @@ def _handle_dart_sync_corp(args: argparse.Namespace) -> None:
     if result.refresh_warning:
         last_date = to_kst(result.last_real_fetch_at).date() if result.last_real_fetch_at else "?"
         print(
-            f"⚠ 갱신 실패, {last_date} master 유지"
-            f"(나이 {result.last_real_fetch_age_days}일 < {stale_fail_days}): "
+            f"⚠ OpenDART corp refresh failed; keeping master from {last_date} "
+            f"(age {result.last_real_fetch_age_days} days < {stale_fail_days}): "
             f"{result.refresh_warning}"
         )
         return
@@ -2902,7 +2902,9 @@ def _handle_profile_publish(args: argparse.Namespace) -> None:
 
     dest_root = Path(args.docs_dir) if args.docs_dir else _PUBLISH_DOCS_DIR
     if dest_root is None:
-        print("❌ --docs-dir not given and SDC_PUBLISH_DOCS_DIR is not set.", file=sys.stderr)
+        print(
+            "❌ --docs-dir not given and SDC_PUBLISH_DOCS_DIR is not set.", file=sys.stderr
+        )
         sys.exit(1)
     dest = dest_root / args.target / run_dir.name
     dest.mkdir(parents=True, exist_ok=True)

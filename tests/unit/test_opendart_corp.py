@@ -619,3 +619,57 @@ def test_postgres_last_successful_run_positive_count_filter_is_cast_safe(
         "fetched_records",
     )
     assert sql.index("::bigint") < sql.index("ORDER BY")
+
+
+def test_postgres_upsert_dart_corp_master_keeps_market_when_incoming_is_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from contextlib import contextmanager
+
+    from collector.kr.infra.db_postgres import repositories
+
+    captured: list[str] = []
+
+    class _Cur:
+        rowcount = 0
+
+        def __enter__(self) -> "_Cur":
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+    class _Conn:
+        def cursor(self, *_a: object, **_k: object) -> _Cur:
+            return _Cur()
+
+    @contextmanager
+    def fake_get_connection(_dsn: str):
+        yield _Conn()
+
+    def fake_execute_counted(_cur: object, sql: str, *_a: object, **_k: object) -> None:
+        captured.append(sql)
+
+    monkeypatch.setattr(repositories, "get_connection", fake_get_connection)
+    monkeypatch.setattr(repositories, "_execute_values_counted", fake_execute_counted)
+
+    storage = repositories.PostgresStorage("postgresql://unused")
+    storage.upsert_dart_corp_master(
+        [
+            DartCorp(
+                corp_code="00999999",
+                corp_name="상장폐지예시",
+                ticker="999999",
+                market=None,
+                stock_name="상장폐지예시",
+                modify_date=date(2024, 4, 1),
+                is_active=False,
+                source=Source.OPENDART,
+                fetched_at=now_kst(),
+            )
+        ]
+    )
+
+    sql = captured[0]
+    assert "market = COALESCE(EXCLUDED.market, dart_corp_master.market)" in sql
+    assert "is_active = EXCLUDED.is_active" in sql
