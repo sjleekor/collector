@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+
+
+<vector beforeServletCall="1791550451017" beforeEJBCall="1791550451020" afterServletCall="1791550451035" afterEJBCall="1791550451035" result="19">
+    <data vectorkey="0" type="Document">
+        <result><ISIN value="KR7069500007"/><KOR_SECN_NM value="KODEX 200"/><ETF_SORT_CD value="A0101"/><ISSUCO_CUSTNO value="8513"/><RGT_STD_DT value="20090731"/><TH1_PAY_TERM_BEGIN_DT value="20090806"/><ESTM_STDPRC value="50"/><BUNBE value=".24414"/><ETF_SORT_NM value="시장지수/코스피200"/><REP_SECN_NM value="삼성자산운용"/><TAXSTD value="0"/><RGT_RSN_DTAIL_NM value="이익분배"/></result>
+    </data>
+    <data vectorkey="1" type="Document">
+        <result><ISIN value="KR7069500007"/><KOR_SECN_NM value="KODEX 200"/><ETF_SORT_CD value="A0101"/><ISSUCO_CUSTNO value="8513"/><RGT_STD_DT value="20090729"/><TH1_PAY_TERM_BEGIN_DT value="20090730"/><ESTM_STDPRC value="50"/><BUNBE value=".24882"/><ETF_SORT_NM value="시장지수/코스피200"/><REP_SECN_NM value="삼성자산운용"/><TAXSTD value="7826.7289627831324"/><RGT_RSN_DTAIL_NM value="이익분배"/></result>
+    </data>
+    <data vectorkey="2" type="Document">
+        <result><ISIN value="KR7105020002"/><KOR_SECN_NM value="TIGER 브릭스"/><ETF_SORT_CD value="R0101"/><ISSUCO_CUSTNO value="14200"/><RGT_STD_DT value="20150223"/><TH1_PAY_TERM_BEGIN_DT value="20150224"/><ESTM_STDPRC value="4915.55976166667"/><BUNBE value=""/><ETF_SORT_NM value="해외지수/해외지수"/><REP_SECN_NM value="미래에셋자산운용"/><TAXSTD value="4678.2991"/><RGT_RSN_DTAIL_NM value="청산분배"/></result>
+    </data>
+    <data vectorkey="3" type="Document">
+        <result><ISIN value="KR7069500007"/><KOR_SECN_NM value="KODEX 200"/><ETF_SORT_CD value="A0101"/><ISSUCO_CUSTNO value="8513"/><RGT_STD_DT value="20150731"/><TH1_PAY_TERM_BEGIN_DT value="20150804"/><ESTM_STDPRC value="5"/><BUNBE value=".02059"/><ETF_SORT_NM value="시장지수/코스피200"/><REP_SECN_NM value="삼성자산운용"/><TAXSTD value="7812.96"/><RGT_RSN_DTAIL_NM value="이익분배"/></result>
+    </data>
+</vector>
