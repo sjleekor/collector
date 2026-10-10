@@ -34,6 +34,7 @@ import logging
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 import requests
@@ -74,6 +75,33 @@ class KrxOpenApiEndpointNotApprovedError(RuntimeError):
     Deliberately not a :class:`SourceAuthError`: the credentials are fine, and
     telling an operator to check the key would send them the wrong way.
     """
+
+
+class KrxOpenApiMalformedResponseError(RuntimeError):
+    """HTTP 200인데 본문이 약속한 모양이 아니다 (``fetch_raw`` 전용).
+
+    ``fetch_rows``는 이런 응답을 ``[]``로 바꿔 돌려준다. 휴장일의 정상 빈 응답과
+    구분이 안 되므로, 기준선 수집 경로는 이것을 실패로 남기고 그 날짜를 완료로
+    치지 않는다 (R4 리뷰 R01).
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class KrxOpenApiRawResponse:
+    """``fetch_raw``의 결과. 받은 바이트를 그대로 들고 있다.
+
+    ``key_slot``은 요청에 쓴 키의 1부터 센 번호다. **키 값은 담지 않는다** —
+    manifest와 로그에 남겨도 비밀이 새지 않게 하려는 것이다.
+    """
+
+    body: bytes
+    fetched_at: datetime
+    status_code: int
+    rows: list[dict[str, Any]]
+    key_slot: int
+    group: str
+    endpoint: str
+    params: dict[str, str]
 
 
 @dataclass(slots=True)
@@ -232,6 +260,137 @@ class KrxOpenApiClient:
 
         self._record_throttle_waits()
         raise RuntimeError(f"KRX Open API request failed ({group}/{endpoint}): {last_error}")
+
+    def fetch_raw(self, group: str, endpoint: str, params: dict[str, str]) -> KrxOpenApiRawResponse:
+        """원문 바이트와 검증된 ``OutBlock_1``을 같이 돌려준다.
+
+        인증·페이싱·키 회전·계수기·분류는 ``fetch_rows``와 같다. 다른 점은 둘이다.
+
+        * HTTP 200이어도 본문이 JSON 객체가 아니거나 ``OutBlock_1``이 없거나
+          리스트가 아니면 5xx처럼 ``max_attempts`` 안에서 다시 시도하고, 그래도
+          그러면 :class:`KrxOpenApiMalformedResponseError`를 던진다.
+          ``{"OutBlock_1": []}``만 정상 빈 응답이다.
+        * 받은 바이트(``response.content``)와 받은 시각(UTC)을 같이 돌려준다.
+          파싱한 값을 다시 직렬화해 저장하면 "받은 본문 그대로"를 못 지킨다.
+
+        Raises:
+            SourceAuthError, SourceQuotaExhaustedError,
+            KrxOpenApiEndpointNotApprovedError: ``fetch_rows``와 같다.
+            KrxOpenApiMalformedResponseError: 200인데 본문이 약속과 다르다.
+            RuntimeError: 그 밖의 실패.
+        """
+        url = f"{self._base_url}/{group}/{endpoint}"
+        last_error: str = ""
+        last_malformed = False
+
+        for attempt in range(1, self._max_attempts + 1):
+            self._bucket.acquire()
+            self.counters.http_requests += 1
+            if attempt > 1:
+                self.counters.http_retries += 1
+
+            key_index = self._key_index
+            try:
+                response = self._session.get(
+                    url,
+                    headers={
+                        "AUTH_KEY": self._keys[key_index],
+                        "Content-Type": "application/json",
+                    },
+                    params=params,
+                    timeout=self._timeout_seconds,
+                )
+            except requests.RequestException as exc:
+                self.counters.http_errors += 1
+                last_error = f"{type(exc).__name__}: {exc}"
+                last_malformed = False
+                if attempt < self._max_attempts:
+                    self._sleep_fn(min(2.0 * attempt, 10.0))
+                    continue
+                break
+            fetched_at = datetime.now(UTC)
+
+            outcome = self._classify(response)
+            if outcome == "ok":
+                rows, problem = self._validated_rows(response)
+                if rows is not None:
+                    self._record_throttle_waits()
+                    return KrxOpenApiRawResponse(
+                        body=bytes(response.content),
+                        fetched_at=fetched_at,
+                        status_code=response.status_code,
+                        rows=rows,
+                        key_slot=key_index + 1,
+                        group=group,
+                        endpoint=endpoint,
+                        params=dict(params),
+                    )
+                self.counters.http_errors += 1
+                last_error = f"HTTP {response.status_code}: {problem}"
+                last_malformed = True
+                if attempt < self._max_attempts:
+                    self._sleep_fn(min(2.0 * attempt, 10.0))
+                    continue
+                break
+
+            if outcome == "quota":
+                self.counters.http_rate_limited += 1
+                if self._rotate_key():
+                    continue
+                self._record_throttle_waits()
+                raise SourceQuotaExhaustedError(
+                    f"KRX Open API quota exhausted on all {len(self._keys)} key(s) "
+                    f"({group}/{endpoint})"
+                )
+
+            self.counters.http_errors += 1
+            if outcome == "unapproved":
+                self._record_throttle_waits()
+                raise KrxOpenApiEndpointNotApprovedError(
+                    f"{group}/{endpoint} is not approved for this key. "
+                    "Apply for it (이용 신청) at https://openapi.krx.co.kr — "
+                    "a valid key alone is not enough."
+                )
+            if outcome == "auth":
+                self._record_throttle_waits()
+                raise SourceAuthError(
+                    f"KRX Open API rejected the key for {group}/{endpoint}: "
+                    f"{self._message(response)}"
+                )
+
+            last_error = f"HTTP {response.status_code}: {self._message(response)}"
+            last_malformed = False
+            if outcome == "retryable" and attempt < self._max_attempts:
+                self._sleep_fn(min(2.0 * attempt, 10.0))
+                continue
+            break
+
+        self._record_throttle_waits()
+        if last_malformed:
+            raise KrxOpenApiMalformedResponseError(
+                f"KRX Open API malformed response ({group}/{endpoint}): {last_error}"
+            )
+        raise RuntimeError(f"KRX Open API request failed ({group}/{endpoint}): {last_error}")
+
+    @staticmethod
+    def _validated_rows(
+        response: requests.Response,
+    ) -> tuple[list[dict[str, Any]] | None, str]:
+        """``(rows, "")`` 또는 ``(None, 사유)``. 사유에 본문 값은 길게 싣지 않는다."""
+        try:
+            body = response.json()
+        except ValueError:
+            return None, "body is not JSON"
+        if not isinstance(body, dict):
+            return None, f"body is {type(body).__name__}, not an object"
+        if RESPONSE_ROWS_KEY not in body:
+            return None, f"{RESPONSE_ROWS_KEY} missing: {str(body)[:120]}"
+        rows = body[RESPONSE_ROWS_KEY]
+        if not isinstance(rows, list):
+            return None, f"{RESPONSE_ROWS_KEY} is {type(rows).__name__}, not a list"
+        if not all(isinstance(row, dict) for row in rows):
+            return None, f"{RESPONSE_ROWS_KEY} has a non-object element"
+        return list(rows), ""
 
     def _classify(self, response: requests.Response) -> str:
         """Map a response to ``ok``/``quota``/``auth``/``unapproved``/... ."""
