@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?><root><message><proframeHeader>
+<pfmAppName>FS-DIS2</pfmAppName>
+<pfmSvcName>DISComStdYMDSO</pfmSvcName>
+<pfmFnName>select</pfmFnName>
+<pfmGlobalNo>2650b8870afe009773fcb78c8ec38e28</pfmGlobalNo>
+<pfmTrDate>20261010</pfmTrDate>
+<pfmTrTime>20261010235626759</pfmTrTime>
+<pfmClntIp>0.0.0.0</pfmClntIp>
+<pfmResponseDtal></pfmResponseDtal>
+</proframeHeader>
+<systemHeader>
+</systemHeader>
+<DISComStdYMDListDTO>
+<dbio_total_count_>1</dbio_total_count_>
+<dbio_fetch_seq_>0</dbio_fetch_seq_>
+<dbio_fetch_size_>0</dbio_fetch_size_>
+<dbio_affected_count_>0</dbio_affected_count_>
+<list>
+<standardCd>1</standardCd>
+<koreanCdtNm />
+<companyCd />
+<koreanNm />
+<saleCompCd />
+<uSaleCompNm />
+<startDt />
+<fundNm />
+<divisionNm />
+<standardDt>20260831</standardDt>
+<manageEps>0</manageEps>
+<saleRewAmt>0</saleRewAmt>
+<trustRewAmt>0</trustRewAmt>
+<generalOfctrtrewAmt>0</generalOfctrtrewAmt>
+<otherEps>0</otherEps>
+<totalAss>0</totalAss>
+<assetsTotSum>0</assetsTotSum>
+<dbio_fetch_seq_>0</dbio_fetch_seq_>
+<dbio_fetch_size_>0</dbio_fetch_size_>
+<gubun />
+<codeDesc />
+</list>
+</DISComStdYMDListDTO></message></root>
