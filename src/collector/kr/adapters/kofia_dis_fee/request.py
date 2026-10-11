@@ -8,11 +8,12 @@
   쓴 본문과 글자 그대로 같다(시험이 고정한다).
 * 최근 기준일: ``FS-DIS2`` / ``DISComStdYMDSO`` / ``select``, ``codeDesc=J_RD``.
 
-**⚠ 최근 기준일 요청 본문은 확인되지 않았다.** 조사 기록에는 서비스 이름과 ``codeDesc=J_RD``만
-남았고(04 §2.1 끝), 실제 본문은 서버 ``research_refs/.../dis_20261010/``에 있다. 아래
-``LATEST_STD_BODY``는 그 이름에서 **추정한 것**이다. 첫 서버 실행 전에 서버 기록과 대조하고,
-다르면 이 상수만 고친다. 틀려도 ``sync``는 직접 탐색(``discovery=direct``)으로 물러나므로
-수집이 멈추지는 않는다(``service/etf_fee_dis.py``).
+최근 기준일 요청 본문은 2026-10-10 23:56 서버에서 성공한 요청
+(``research_refs/.../dis_20261010/req_std.xml``)과 글자 그대로 같다.
+입력 DTO는 ``DISComStdYMDDTO``다(화면 스크립트 ``srchCond_inquiryPeriod.js``의
+``setStdDtOp``). 응답은 ``DISComStdYMDListDTO/list/standardDt`` 하나에 날짜가 온다
+(fixture ``latest_j_rd.xml``, 그때 값 20260831). 틀린 DTO(``DISCondFuncDTO``)로 처음 썼던 것을
+메인 검증에서 고쳤다(10-11).
 """
 
 from __future__ import annotations
@@ -57,9 +58,9 @@ LATEST_STD_BODY = """<?xml version="1.0" encoding="utf-8"?>
     <pfmFnName>select</pfmFnName>
   </proframeHeader>
   <systemHeader></systemHeader>
-    <DISCondFuncDTO>
+    <DISComStdYMDDTO>
     <codeDesc>J_RD</codeDesc>
-</DISCondFuncDTO>
+</DISComStdYMDDTO>
 </message>
 """
 

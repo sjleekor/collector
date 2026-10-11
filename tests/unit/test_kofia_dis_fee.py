@@ -68,6 +68,13 @@ def test_latest_request_names_the_service_and_code() -> None:
     assert "DISComStdYMDSO" in xml and "J_RD" in xml
 
 
+def test_latest_request_uses_the_dto_the_server_accepted() -> None:
+    # 2026-10-10 23:56 서버에서 성공한 요청(req_std.xml)의 입력 DTO. DISCondFuncDTO가 아니다.
+    xml = build_latest_std_request()
+    assert "<DISComStdYMDDTO>" in xml and "</DISComStdYMDDTO>" in xml
+    assert "DISCondFuncDTO" not in xml
+
+
 # ------------------------------------------------------------------ 월말 후보
 
 
@@ -243,3 +250,9 @@ def test_latest_std_date_ignores_the_header_transaction_date() -> None:
     assert parse_latest_std_date(xml, date(2026, 8, 1)) == date(2026, 7, 31)
     assert parse_latest_std_date(b"<root><message/></root>") is None
     assert parse_latest_std_date(b"garbage") is None
+
+
+def test_latest_std_date_reads_the_real_server_response() -> None:
+    # 2026-10-10 23:56 서버 응답(IP만 0.0.0.0으로 바꿈)
+    # standardDt 20260831, 머리 pfmTrDate 20261010
+    assert parse_latest_std_date(body("latest_j_rd.xml"), date(2026, 10, 11)) == date(2026, 8, 31)
