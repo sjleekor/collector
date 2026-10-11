@@ -111,6 +111,7 @@ flowchart TD
 | `sdc_daily_krx_index` | Mon-Fri 20:10 (**예정**) | 없음 | `index-sync-krx-openapi.sh` | KRX Open API 업종·규모·대표지수(`krx_index_daily`)를 증분 동기화한다. 기본 lookback 7일, 끝은 어제(KST)까지다(당일분은 공개되지 않는다). Cronicle 등록은 별도로 한다. |
 | `sdc_daily_krx_baseline` | Mon-Fri 20:40 (**꺼진 채 등록**) | 없음 | `krx-baseline-sync.sh` | R-4 기준선 수집: KRX Open API의 ETF 일봉·채권지수·파생상품지수(코스피 200 TR)를 `$STOCK_DATA_ROOT/kr/raw/krx_baseline`(parquet)에 쌓는다. 어제(KST)까지 **최근 평일 20일 창** 안의 빈·대기 날짜만 받고(`--max-calls 60`은 실제 HTTP 수) 창 밖은 받지 않는다. 락 도메인 `krx_baseline`(일회성 import·backfill도 같은 락). `memory_limit`을 비우지 말고 명시한다. **켜는 순서: release 때 꺼진 채 등록 → ETF 조사 사본 import → `KRX_BASELINE_MODE=verify` → 이 이벤트 켜기.** |
 | `sdc_weekly_seibro_dist` | Sunday 10:30 (**꺼진 채 등록**) | 없음 | `seibro-dist-sync.sh` | R-4 기준선 수집: SEIBro ETF 분배금을 같은 레이크에 쌓는다. 창은 마지막 완료 창의 끝에서 90일 앞부터 오늘까지이고, 1·4·7·10월 첫 일요일은 전체 재확인이다. 락 도메인 `seibro`. 스위치 `SDC_SEIBRO_ENABLED`(0이면 요청 없이 종료), 전체 받기 강제 `SEIBRO_DIST_FULL=1`. 최초 전체 받기를 끝낸 뒤 켠다. `memory_limit` 명시. |
+| `sdc_weekly_etf_fee_dis` | Sunday 10:40 (**다음 release, 꺼진 채 등록**) | 없음 | `etf-fee-dis-sync.sh` | R-4 #6 ETF 총보수: 금투협 DIS "펀드별 보수비용비교" 월말 기준일을 같은 레이크(`etf_fee_snapshot`)에 쌓는다. 저장된 마지막 달 뒤에 새 월말이 올라왔는지 보고 받는다(`ETF_FEE_DIS_DISCOVERY=latest`면 새 달이 없을 때 요청 1건, `direct`면 4건). 월 1회 값이라 **주 1회 권고**이고, 매일 돌려도 가볍지만 얻는 것은 공개 지연의 일 단위 해상도뿐이다(사용자 결정). 락 도메인 `kofia_dis`. `memory_limit` 명시. **켜는 순서: 연구용 사본 import(`ETF_FEE_DIS_MODE=import-research`) → `verify` → 이 이벤트 켜기.** 10-21 release에는 넣지 않는다. |
 | `sdc_daily_fdr_common` | Mon-Fri 20:30 | 없음 | `common-sync-fdr.sh` | FDR common feature raw series를 증분 동기화한다. |
 | `sdc_daily_fred_common` | Mon-Fri 20:30 | 없음 | `common-sync-fred.sh` | FRED common feature raw series를 증분 동기화한다. |
 | `sdc_daily_ecos_common_daily` | Mon-Fri 20:30 | `sdc_daily_ecos_common_macro` | `common-sync-ecos-daily.sh` | ECOS 일간 common feature raw series를 증분 동기화한다. |
@@ -202,6 +203,7 @@ source lock은 `/tmp/sdc-locks/<domain>.lock`에 `flock`을 걸고, lock 획득 
 | `ecos` | `common-sync-ecos-daily.sh`, `common-sync-ecos-macro.sh` | 10s |
 | `krx_baseline` | `krx-baseline-sync.sh`(sync·backfill·import-research. `verify`는 락 없음) | 없음 (throttle 안 둠) |
 | `seibro` | `seibro-dist-sync.sh` | 없음 (throttle 안 둠) |
+| `kofia_dis` | `etf-fee-dis-sync.sh`(sync·backfill·import-research. `verify`는 락 없음) | 없음 (클라이언트 안 3초 간격) |
 | `krx_marketdata` | `prices-backfill-incremental.sh`, `flows-sync.sh`, `common-sync-krx.sh`, `common-sync-pykrx.sh` | 60s |
 | `opendart` | OpenDART sync wrappers, OpenDART backfill | 5s |
 | **`us`** | **`us-daily.sh`** | **0s** — 원천별 간격은 각 클라이언트 안에 있다 (SEC 5s · FINRA·Wikipedia·FRED 1s · Nasdaq 1.5s) |
