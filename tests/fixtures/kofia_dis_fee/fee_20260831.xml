@@ -1,0 +1,333 @@
+<?xml version="1.0" encoding="UTF-8"?><root><message><proframeHeader>
+<pfmAppName>FS-DIS2</pfmAppName>
+<pfmSvcName>DISFundFeeCmsSO</pfmSvcName>
+<pfmFnName>select</pfmFnName>
+<pfmGlobalNo>266fae650afe00967c2c7bad1fd90733</pfmGlobalNo>
+<pfmTrDate>20261011</pfmTrDate>
+<pfmTrTime>20261011003015781</pfmTrTime>
+<pfmClntIp>0.0.0.0</pfmClntIp>
+<pfmResponseDtal></pfmResponseDtal>
+</proframeHeader>
+<systemHeader>
+</systemHeader>
+<DISCondFuncListDTO>
+<dbio_total_count_>3</dbio_total_count_>
+<dbio_fetch_seq_>0</dbio_fetch_seq_>
+<dbio_fetch_size_>0</dbio_fetch_size_>
+<dbio_affected_count_>0</dbio_affected_count_>
+<extlist>
+<extType />
+<ext1 />
+<ext2>vGridBtn1^0</ext2>
+<ext3 />
+</extlist>
+<extlist>
+<extType />
+<ext1 />
+<ext2>vGridBtn1^0</ext2>
+<ext3 />
+</extlist>
+<extlist>
+<extType />
+<ext1 />
+<ext2>vGridBtn1^0</ext2>
+<ext3 />
+</extlist>
+<selectMeta>
+<vGridChgImg1 />
+<vGridBtn1 />
+<tmpV1>교보자산운용</tmpV1>
+<tmpV2>교보파워K-주주가치액티브증권상장지수투자신탁[주식]</tmpV2>
+<tmpV3>주식형</tmpV3>
+<tmpV4>20240923</tmpV4>
+<tmpV5>.35</tmpV5>
+<tmpV6>.025</tmpV6>
+<tmpV7>.015</tmpV7>
+<tmpV8>.015</tmpV8>
+<tmpV9>.405</tmpV9>
+<tmpV10>.4191</tmpV10>
+<tmpV11>.07</tmpV11>
+<tmpV12>.47</tmpV12>
+<tmpV13>0</tmpV13>
+<tmpV14>0</tmpV14>
+<tmpV15>K55207EE5208</tmpV15>
+<tmpV16>.1009</tmpV16>
+<tmpV17 />
+<tmpV18 />
+<tmpV19 />
+<tmpV20 />
+<tmpV22 />
+<tmpV23 />
+<tmpV24 />
+<tmpV25 />
+<tmpV26 />
+<tmpV27 />
+<tmpV28 />
+<tmpV29 />
+<tmpV30 />
+<tmpV31 />
+<tmpV32 />
+<tmpV33 />
+<tmpV34 />
+<tmpV35 />
+<tmpV36 />
+<tmpV37 />
+<tmpV38 />
+<tmpV39 />
+<tmpV40 />
+<tmpV41 />
+<tmpV42 />
+<tmpV43 />
+<tmpV44 />
+<tmpV45 />
+<tmpV46 />
+<tmpV47 />
+<tmpV49 />
+<tmpV50 />
+<tmpV51 />
+<tmpV52 />
+<tmpV53 />
+<tmpV54 />
+<tmpV56 />
+<tmpV58 />
+<tmpV60 />
+<tmpV61 />
+<tmpV62 />
+<tmpV63 />
+<tmpV64 />
+<tmpV65 />
+<tmpV66 />
+<tmpV67 />
+<tmpV68 />
+<tmpV69 />
+<tmpV70 />
+<tmpV71 />
+<tmpV73 />
+<tmpV74 />
+<tmpV75 />
+<tmpV76 />
+<tmpV77 />
+<tmpV78 />
+<tmpV79 />
+<tmpV80 />
+<tmpV81 />
+<tmpV82 />
+<tmpV83 />
+<tmpV84 />
+<tmpV85 />
+<tmpV87 />
+<tmpV88 />
+<tmpV89 />
+<tmpV90 />
+<tmpV91 />
+<tmpV92 />
+<tmpV93 />
+<tmpV94 />
+<tmpV95 />
+<tmpV96 />
+<tmpV97 />
+<tmpV98 />
+<tmpV99 />
+<tmpV100 />
+<serviceDesc />
+<messageOccuDesc />
+</selectMeta>
+<selectMeta>
+<vGridChgImg1 />
+<vGridBtn1 />
+<tmpV1>교보자산운용</tmpV1>
+<tmpV2>교보파워K100증권상장지수투자신탁(주식)</tmpV2>
+<tmpV3>주식형</tmpV3>
+<tmpV4>20110428</tmpV4>
+<tmpV5>.11</tmpV5>
+<tmpV6>.01</tmpV6>
+<tmpV7>.01</tmpV7>
+<tmpV8>.025</tmpV8>
+<tmpV9>.155</tmpV9>
+<tmpV10>.4191</tmpV10>
+<tmpV11>.02</tmpV11>
+<tmpV12>.18</tmpV12>
+<tmpV13>0</tmpV13>
+<tmpV14>0</tmpV14>
+<tmpV15>KR5207A24857</tmpV15>
+<tmpV16>.0232</tmpV16>
+<tmpV17 />
+<tmpV18 />
+<tmpV19 />
+<tmpV20 />
+<tmpV22 />
+<tmpV23 />
+<tmpV24 />
+<tmpV25 />
+<tmpV26 />
+<tmpV27 />
+<tmpV28 />
+<tmpV29 />
+<tmpV30 />
+<tmpV31 />
+<tmpV32 />
+<tmpV33 />
+<tmpV34 />
+<tmpV35 />
+<tmpV36 />
+<tmpV37 />
+<tmpV38 />
+<tmpV39 />
+<tmpV40 />
+<tmpV41 />
+<tmpV42 />
+<tmpV43 />
+<tmpV44 />
+<tmpV45 />
+<tmpV46 />
+<tmpV47 />
+<tmpV49 />
+<tmpV50 />
+<tmpV51 />
+<tmpV52 />
+<tmpV53 />
+<tmpV54 />
+<tmpV56 />
+<tmpV58 />
+<tmpV60 />
+<tmpV61 />
+<tmpV62 />
+<tmpV63 />
+<tmpV64 />
+<tmpV65 />
+<tmpV66 />
+<tmpV67 />
+<tmpV68 />
+<tmpV69 />
+<tmpV70 />
+<tmpV71 />
+<tmpV73 />
+<tmpV74 />
+<tmpV75 />
+<tmpV76 />
+<tmpV77 />
+<tmpV78 />
+<tmpV79 />
+<tmpV80 />
+<tmpV81 />
+<tmpV82 />
+<tmpV83 />
+<tmpV84 />
+<tmpV85 />
+<tmpV87 />
+<tmpV88 />
+<tmpV89 />
+<tmpV90 />
+<tmpV91 />
+<tmpV92 />
+<tmpV93 />
+<tmpV94 />
+<tmpV95 />
+<tmpV96 />
+<tmpV97 />
+<tmpV98 />
+<tmpV99 />
+<tmpV100 />
+<serviceDesc />
+<messageOccuDesc />
+</selectMeta>
+<selectMeta>
+<vGridChgImg1 />
+<vGridBtn1 />
+<tmpV1>교보자산운용</tmpV1>
+<tmpV2>교보파워K200증권상장지수투자신탁(주식)</tmpV2>
+<tmpV3>주식형</tmpV3>
+<tmpV4>20120210</tmpV4>
+<tmpV5>.1</tmpV5>
+<tmpV6>.01</tmpV6>
+<tmpV7>.01</tmpV7>
+<tmpV8>.025</tmpV8>
+<tmpV9>.145</tmpV9>
+<tmpV10>.4191</tmpV10>
+<tmpV11>.02</tmpV11>
+<tmpV12>.17</tmpV12>
+<tmpV13>0</tmpV13>
+<tmpV14>0</tmpV14>
+<tmpV15>KR5207A82418</tmpV15>
+<tmpV16>.0081</tmpV16>
+<tmpV17 />
+<tmpV18 />
+<tmpV19 />
+<tmpV20 />
+<tmpV22 />
+<tmpV23 />
+<tmpV24 />
+<tmpV25 />
+<tmpV26 />
+<tmpV27 />
+<tmpV28 />
+<tmpV29 />
+<tmpV30 />
+<tmpV31 />
+<tmpV32 />
+<tmpV33 />
+<tmpV34 />
+<tmpV35 />
+<tmpV36 />
+<tmpV37 />
+<tmpV38 />
+<tmpV39 />
+<tmpV40 />
+<tmpV41 />
+<tmpV42 />
+<tmpV43 />
+<tmpV44 />
+<tmpV45 />
+<tmpV46 />
+<tmpV47 />
+<tmpV49 />
+<tmpV50 />
+<tmpV51 />
+<tmpV52 />
+<tmpV53 />
+<tmpV54 />
+<tmpV56 />
+<tmpV58 />
+<tmpV60 />
+<tmpV61 />
+<tmpV62 />
+<tmpV63 />
+<tmpV64 />
+<tmpV65 />
+<tmpV66 />
+<tmpV67 />
+<tmpV68 />
+<tmpV69 />
+<tmpV70 />
+<tmpV71 />
+<tmpV73 />
+<tmpV74 />
+<tmpV75 />
+<tmpV76 />
+<tmpV77 />
+<tmpV78 />
+<tmpV79 />
+<tmpV80 />
+<tmpV81 />
+<tmpV82 />
+<tmpV83 />
+<tmpV84 />
+<tmpV85 />
+<tmpV87 />
+<tmpV88 />
+<tmpV89 />
+<tmpV90 />
+<tmpV91 />
+<tmpV92 />
+<tmpV93 />
+<tmpV94 />
+<tmpV95 />
+<tmpV96 />
+<tmpV97 />
+<tmpV98 />
+<tmpV99 />
+<tmpV100 />
+<serviceDesc />
+<messageOccuDesc />
+</selectMeta>
+</DISCondFuncListDTO></message></root>

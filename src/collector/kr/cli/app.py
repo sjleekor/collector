@@ -2695,6 +2695,118 @@ def _handle_seibro_dist_sync(args: argparse.Namespace) -> None:
     print("완료.")
 
 
+def _print_etf_fee_dis_result(result: object) -> None:
+    fetched = ",".join(result.months_fetched) or "-"
+    print(
+        f"   - 발견 {result.discovery}, 최근 기준일 {result.latest_std or '-'}, 계획 "
+        f"{result.months_planned}달, 받음 {fetched}, 새 관측 {result.new_obs}, 같음 {result.same}, "
+        f"빈 날 {result.empty_days}, 실패 {result.failures}, HTTP {result.http_requests}, "
+        f"끊김 {result.truncated}, 원문 복구 {result.recovered}"
+    )
+    if result.months_missing:
+        print(f"     후보를 다 물어도 값이 없는 달: {','.join(result.months_missing)}")
+    if result.stopped_by:
+        print(f"     멈춘 이유: {result.stopped_by}")
+    for key, message in list(result.errors.items())[:5]:
+        print(f"     {key}: {message}", file=sys.stderr)
+
+
+def _exit_for_etf_fee_dis(result: object) -> None:
+    if result.stopped_by == "empty_store":
+        sys.exit(1)
+    if result.failures or result.stopped_by == "consecutive_failures":
+        print(
+            "경고: 받지 못한 날짜가 있습니다. 다음 실행이 같은 날짜부터 다시 받습니다.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if result.nothing_new:
+        print("새로 올라온 월말 기준일이 없습니다(정상).")
+    else:
+        print("완료.")
+
+
+def _handle_etf_fee_dis_sync(args: argparse.Namespace) -> None:
+    """``collector etf-fee-dis sync`` — 새 월말 기준일이 있으면 받는다(없으면 요청 1건)."""
+    from collector.kr.adapters.kofia_dis_fee import PUBLIC_LAG_NOTE, DisClient
+    from collector.kr.service import etf_fee_dis as ed
+
+    print(f"-> etf-fee-dis sync: discovery={args.discovery}, max_calls={args.max_calls}")
+    print(f"   ({PUBLIC_LAG_NOTE})")
+    result = ed.sync(
+        store=_baseline_store(),
+        client=DisClient(),
+        discovery=args.discovery,
+        max_calls=args.max_calls,
+        max_consecutive_failures=args.max_consecutive_failures,
+    )
+    _print_etf_fee_dis_result(result)
+    _exit_for_etf_fee_dis(result)
+
+
+def _handle_etf_fee_dis_backfill(args: argparse.Namespace) -> None:
+    """``collector etf-fee-dis backfill`` — 달 범위 월말 백필(fill·reobserve)."""
+    from collector.kr.adapters.kofia_dis_fee import DisClient, parse_month
+    from collector.kr.service import etf_fee_dis as ed
+
+    try:
+        start, end = parse_month(args.start), parse_month(args.end)
+        print(
+            f"-> etf-fee-dis backfill: {args.start}~{args.end}, mode={args.mode}, "
+            f"run_id={args.run_id}, max_calls={args.max_calls}"
+        )
+        result = ed.backfill(
+            store=_baseline_store(),
+            client=DisClient(),
+            start=start,
+            end=end,
+            mode=args.mode,
+            run_id=args.run_id,
+            max_calls=args.max_calls,
+            max_consecutive_failures=args.max_consecutive_failures,
+        )
+    except ValueError as exc:
+        print(f"오류: {exc}", file=sys.stderr)
+        sys.exit(1)
+    _print_etf_fee_dis_result(result)
+    if result.stopped_by == "max_calls":
+        print("--max-calls에서 멈췄습니다. 같은 명령을 다시 돌리면 이어 받습니다.")
+    _exit_for_etf_fee_dis(result)
+
+
+def _handle_etf_fee_dis_import_research(args: argparse.Namespace) -> None:
+    """``collector etf-fee-dis import-research`` — 연구용 월말 이력 사본(HTTP 0)."""
+    from collector.kr.service import etf_fee_dis as ed
+
+    print(f"-> etf-fee-dis import-research: path={args.path}, force={args.force}")
+    try:
+        result = ed.import_research(
+            store=_baseline_store(),
+            path=Path(args.path),
+            expect_manifest_sha256=args.expect_manifest_sha256,
+            force=args.force,
+        )
+    except ed.DisImportError as exc:
+        print(f"오류: {exc}", file=sys.stderr)
+        sys.exit(1)
+    print(
+        f"   - 파일 {result.files_total}, 들임 {result.imported}, 이미 끝냄 {result.skipped_done}, "
+        f"행 {result.rows:,}, 원문 복구 {result.recovered}"
+    )
+    print("완료.")
+
+
+def _handle_etf_fee_dis_verify(args: argparse.Namespace) -> None:
+    """``collector etf-fee-dis verify`` — 완결성·무결성. 실패가 있으면 종료 코드 1."""
+    from collector.kr.service.etf_fee_dis_verify import verify
+    from collector.kr.util.time import now_kst
+
+    report = verify(_baseline_store(), today=now_kst().date())
+    print(report.render())
+    if not report.ok:
+        sys.exit(1)
+
+
 def _handle_validate(args: argparse.Namespace) -> None:
     """Handle ``collector validate``."""
     settings = get_settings()
@@ -4542,6 +4654,46 @@ def build_parser() -> argparse.ArgumentParser:
     )
     seibro_sync.add_argument("--full", action="store_true", default=False)
     seibro_sync.set_defaults(handler=_handle_seibro_dist_sync)
+
+    # -- etf-fee-dis (R-4 #6 총보수, 금투협 DIS 월말) ------------------------------
+    fee_parser = subparsers.add_parser(
+        "etf-fee-dis", help="R-4 baseline #6: ETF total-expense history from KOFIA DIS (month-end)."
+    )
+    fee_sub = fee_parser.add_subparsers(dest="etf_fee_dis_command", required=True)
+    fee_sync = fee_sub.add_parser(
+        "sync", help="Fetch month-ends newer than the last stored one (1 request when none)."
+    )
+    fee_sync.add_argument(
+        "--discovery",
+        choices=("latest", "direct"),
+        default="latest",
+        help="latest: ask the latest standard date first; direct: probe the next month-end.",
+    )
+    fee_sync.add_argument("--max-calls", type=int, default=30)
+    fee_sync.add_argument("--max-consecutive-failures", type=int, default=3)
+    fee_sync.set_defaults(handler=_handle_etf_fee_dis_sync)
+
+    fee_backfill = fee_sub.add_parser("backfill", help="Backfill a month range (YYYY-MM).")
+    fee_backfill.add_argument("--from", dest="start", required=True, help="YYYY-MM")
+    fee_backfill.add_argument("--to", dest="end", required=True, help="YYYY-MM")
+    fee_backfill.add_argument("--mode", choices=("fill", "reobserve"), default="fill")
+    fee_backfill.add_argument(
+        "--run-id", default=None, help="Required for reobserve: resume is judged by this id."
+    )
+    fee_backfill.add_argument("--max-calls", type=int, default=None)
+    fee_backfill.add_argument("--max-consecutive-failures", type=int, default=3)
+    fee_backfill.set_defaults(handler=_handle_etf_fee_dis_backfill)
+
+    fee_import = fee_sub.add_parser(
+        "import-research", help="Import the 2026-10-11 research copy as obs_seq=1 (no HTTP)."
+    )
+    fee_import.add_argument("--path", required=True, help="Directory with manifest.jsonl and raw/.")
+    fee_import.add_argument("--expect-manifest-sha256", required=True)
+    fee_import.add_argument("--force", action="store_true", default=False)
+    fee_import.set_defaults(handler=_handle_etf_fee_dis_import_research)
+
+    fee_verify = fee_sub.add_parser("verify", help="Check completeness and integrity.")
+    fee_verify.set_defaults(handler=_handle_etf_fee_dis_verify)
 
     # -- profile --------------------------------------------------------------
     profile_parser = subparsers.add_parser(
