@@ -2070,6 +2070,7 @@ def _handle_flows_sync_kis(args: argparse.Namespace) -> None:
     from collector.kr.infra.calendar.trading_days import get_trading_days
     from collector.kr.infra.db_postgres.repositories import PostgresStorage
     from collector.kr.service.sync_kis_flows import (
+        FOREIGN_HOLDING_GROUP,
         build_kis_flow_plan,
         load_kis_flow_targets,
         sync_kis_security_flows,
@@ -2192,7 +2193,23 @@ def _handle_flows_sync_kis(args: argparse.Namespace) -> None:
         bucket=TokenBucket(requests_per_second, burst=settings.kis_max_burst_requests),
         timeout_seconds=timeout_seconds,
     )
-    provider = KisFlowProvider(client=client)
+    # The foreign-holding request is the same inquire-price call that carries the
+    # status flags, so they are parsed out of the same response (no extra request)
+    # and filed under the day we asked. A non-trading day would only copy the last
+    # session's flags under a date with no session, so capture is off then.
+    capture_status = False
+    if args.no_status:
+        print("   - Status flags: off (--no-status).")
+    elif FOREIGN_HOLDING_GROUP not in enabled_groups:
+        print("   - Status flags: off (foreign_holding group is not enabled).")
+    elif not get_trading_days(today, today):
+        print(f"   - Status flags: off ({today} is not a KRX trading day).")
+    else:
+        capture_status = True
+    provider = KisFlowProvider(
+        client=client,
+        status_snapshot_date=today if capture_status else None,
+    )
 
     result = sync_kis_security_flows(
         provider,
@@ -2204,6 +2221,7 @@ def _handle_flows_sync_kis(args: argparse.Namespace) -> None:
         scope=scope,
         max_consecutive_failures=args.max_consecutive_failures,
         no_data_ttl_days=args.no_data_ttl_days,
+        capture_status=capture_status,
     )
 
     if result.aborted_reason:
@@ -2249,9 +2267,36 @@ def _handle_flows_sync_kis(args: argparse.Namespace) -> None:
     if result.errors:
         for request_key, error in list(result.errors.items())[:10]:
             print(f"   - Error {request_key}: {error}")
+    if result.status_capture:
+        print(
+            f"   - Status flags: attempted={result.status_attempted}, "
+            f"inserted={result.status_rows_inserted}, "
+            f"failed={len(result.status_errors)}, "
+            f"managed={result.status_flagged_managed}, "
+            f"temp_stop={result.status_flagged_temp_stop}, "
+            f"market_warning={result.status_flagged_market_warning}"
+        )
+        for ticker, error in list(result.status_errors.items())[:10]:
+            print(f"   - Status error {ticker}: {error}")
 
     if result.aborted_reason:
         sys.exit(75 if result.aborted_reason == "SourceQuotaExhaustedError" else 1)
+    if result.status_capture and result.status_errors:
+        # The flow rows are stored either way; this only makes a flag problem
+        # visible. A few tickers can fail for good, so only a large share is red.
+        denominator = max(result.status_attempted, 1)
+        ratio = len(result.status_errors) / denominator
+        print(
+            f"⚠ {len(result.status_errors)} of {result.status_attempted} status rows are "
+            f"missing ({ratio:.1%}); fill them with `flows sync-kis-status`.",
+            file=sys.stderr,
+        )
+        if ratio > args.max_status_missing_ratio:
+            print(
+                f"❌ status missing share {ratio:.1%} > {args.max_status_missing_ratio:.1%}.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
 
 def _handle_flows_sync_kis_status(args: argparse.Namespace) -> None:
@@ -4393,6 +4438,24 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Resolve and print the work plan without calling KIS. "
             "Issues no token and sends no request."
+        ),
+    )
+    flows_sync_kis.add_argument(
+        "--no-status",
+        action="store_true",
+        help=(
+            "Do not store the status flags (관리종목·거래정지·시장경보) that the "
+            "foreign_holding request already returns. Default: store them."
+        ),
+    )
+    flows_sync_kis.add_argument(
+        "--max-status-missing-ratio",
+        type=float,
+        default=0.02,
+        help=(
+            "Exit 1 when more than this share of foreign_holding requests produced no status "
+            "row (default 0.02). The flow rows are stored regardless; refill the flags with "
+            "`flows sync-kis-status`."
         ),
     )
     flows_sync_kis.set_defaults(handler=_handle_flows_sync_kis)

@@ -46,18 +46,35 @@ def _run(
     return result, capture
 
 
-def test_default_runs_the_status_command_as_root_in_the_kis_lock_domain(tmp_path: Path) -> None:
+def test_default_runs_the_status_command_as_invoking_user_in_the_kis_lock_domain(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "state").mkdir()
     result, capture = _run(tmp_path)
 
     assert result.returncode == 0, result.stdout + result.stderr
     line = capture.read_text().splitlines()[-1]
     assert "flows sync-kis-status" in line
-    assert "--user" not in line  # 토큰 캐시가 root 0600이라 기본은 root
+    assert f"--user {os.getuid()}:{os.getgid()} -e HOME=/tmp" in line
     assert "lock acquired: domain=kis" in result.stdout
     assert "sdc-collector-kis" in result.stdout  # flows-sync-kis.sh와 같은 컨테이너 이름
 
 
+def test_root_escape_hatch_runs_as_root_without_the_token_check(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    state.chmod(0o555)  # 호출자는 못 쓰지만 root 탈출구는 검사하지 않는다
+    try:
+        result, capture = _run(tmp_path, extra_env={"SDC_RUN_AS_ROOT": "1"})
+    finally:
+        state.chmod(0o755)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "--user" not in capture.read_text()
+
+
 def test_extra_arguments_are_passed_through(tmp_path: Path) -> None:
+    (tmp_path / "state").mkdir()
     result, capture = _run(tmp_path, ["--plan-only", "--tickers", "005930"])
 
     assert result.returncode == 0, result.stdout + result.stderr
@@ -65,12 +82,14 @@ def test_extra_arguments_are_passed_through(tmp_path: Path) -> None:
 
 
 def test_default_lock_wait_is_long_enough_to_outlast_the_19h_flows_job(tmp_path: Path) -> None:
+    (tmp_path / "state").mkdir()
     result, _ = _run(tmp_path)
 
     assert "wait=3600s" in result.stdout
 
 
 def test_lock_wait_can_be_overridden(tmp_path: Path) -> None:
+    (tmp_path / "state").mkdir()
     result, _ = _run(tmp_path, extra_env={"SDC_LOCK_WAIT_SECONDS": "5"})
 
     assert "wait=5s" in result.stdout

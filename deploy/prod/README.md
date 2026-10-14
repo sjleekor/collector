@@ -106,7 +106,7 @@ flowchart TD
 | `sdc_daily_pykrx_prices` | chain-only | `sdc_daily_krx_flows` | `prices-backfill-incremental.sh` | 전체 시장 일봉 가격을 증분 backfill한다. 기본 lookback은 0일, 자동 range guard는 10일이다. |
 | `sdc_daily_krx_flows` | chain-only | `sdc_daily_krx_common` | `flows-sync.sh` | 가격 최신일을 기준으로 KRX 수급 데이터를 증분 동기화한다. 기본 lookback은 14일, 자동 range guard는 30일이다. |
 | `sdc_daily_krx_common` | chain-only | 없음 | `common-sync-krx.sh` | KRX 계열 common feature raw series를 증분 동기화한다. 현재는 `krx_flows` 성공 후에만 실행된다. |
-| `sdc_kis_flows_trial` | Mon-Fri 19:00 | 없음 | `flows-sync-kis.sh` | KIS `foreign_holding`을 전 종목 동기화한다. |
+| `sdc_kis_flows_trial` | Mon-Fri 19:00 | 없음 | `flows-sync-kis.sh` | KIS `foreign_holding`을 전 종목 동기화한다. 같은 `inquire-price` 응답에서 관리종목·거래정지·시장경보 플래그도 `kis_stock_status_daily`에 같이 쌓는다(추가 요청 0, 10월 계획 4.2-b; 끄려면 `KIS_FLOW_NO_STATUS=1`). 컨테이너는 호출자 uid로 돈다 — 배포 전에 아래 "KIS 토큰 캐시 소유권"을 한 번 한다. |
 | `sdc_daily_market_cap` | Mon-Fri 20:00 | 없음 | `prices-market-cap-backfill.sh` | 최근 30일의 `daily_market_cap` gap을 확인하고 T+1 원천의 빠진 세션을 채운다. |
 | `sdc_daily_krx_index` | Mon-Fri 20:10 (**예정**) | 없음 | `index-sync-krx-openapi.sh` | KRX Open API 업종·규모·대표지수(`krx_index_daily`)를 증분 동기화한다. 기본 lookback 7일, 끝은 어제(KST)까지다(당일분은 공개되지 않는다). Cronicle 등록은 별도로 한다. |
 | `sdc_daily_fdr_common` | Mon-Fri 20:30 | 없음 | `common-sync-fdr.sh` | FDR common feature raw series를 증분 동기화한다. |
@@ -114,7 +114,7 @@ flowchart TD
 | `sdc_daily_ecos_common_daily` | Mon-Fri 20:30 | `sdc_daily_ecos_common_macro` | `common-sync-ecos-daily.sh` | ECOS 일간 common feature raw series를 증분 동기화한다. |
 | `sdc_daily_ecos_common_macro` | chain-only | 없음 | `common-sync-ecos-macro.sh` | ECOS 월간 macro series(`macro_cpi`, `macro_ppi`, `macro_m2`, `macro_consumer_sentiment`)를 긴 lookback으로 동기화한다. |
 | `sdc_kis_flows_weekly` | Monday 20:30 | 없음 | `flows-sync-kis.sh` | KIS investor/shorting 지표를 주 1회 동기화한다. |
-| `sdc_kis_status_daily` | Mon-Fri 22:15 (**예정**) | 없음 | `flows-sync-kis-status.sh` | KIS `inquire-price`의 관리종목·거래정지·시장경보 플래그를 전 종목 일간 스냅샷(`kis_stock_status_daily`)으로 쌓는다. 종목당 1요청, 약 47분. `kis` 락을 `sdc_kis_flows_*`와 같이 쓰므로 직렬로 돈다. 다시 돌리면 빠진 종목만 받는다. 배포 전에 `db init`(또는 `sql/migrations/20261008_*`)로 테이블을 만든다. Cronicle 등록은 별도로 한다. |
+| `sdc_kis_status_daily` | Mon-Fri 22:15 (**예정 → 19:00 `sdc_kis_flows_trial`에 합쳐 보류**) | 없음 | `flows-sync-kis-status.sh` | 19:00 잡이 플래그를 같이 쌓으므로(위) 평소에는 등록하지 않는다. 19:00 잡이 놓친 종목(실패·수급이 이미 저장돼 건너뛴 종목)을 채우는 수동·보충용이다. KIS `inquire-price`의 관리종목·거래정지·시장경보 플래그를 전 종목 일간 스냅샷(`kis_stock_status_daily`)으로 쌓는다. 종목당 1요청, 약 47분. `kis` 락을 `sdc_kis_flows_*`와 같이 쓰므로 직렬로 돈다. 다시 돌리면 빠진 종목만 받는다. 배포 전에 `db init`(또는 `sql/migrations/20261008_*`)로 테이블을 만든다. Cronicle 등록은 별도로 한다. |
 | `sdc_daily_freshness` | daily 23:00 | 없음 | `ops-freshness-report.sh` | 저녁 수집이 끝난 뒤 raw 최신일을 검사하고 stale이면 실패한다. |
 | `sdc_daily_opendart_corp` | daily 04:00 | `sdc_daily_opendart_financials` | `dart-sync-corp.sh` | OpenDART corp master를 동기화한다. |
 | `sdc_daily_opendart_financials` | chain-only | `sdc_daily_opendart_share_info` | `dart-sync-financials.sh` | OpenDART 재무제표를 증분 동기화한다. 기본 lookback은 1년, attempt guard는 10,000건이다. |
@@ -277,10 +277,35 @@ US 레이크에는 이미 root 소유 9,500여 개가 쌓였다(2026-10-05 실�
   (정상이면 0건, 실측 40ms 이하) 걸린 것만 쓰기·읽기 권한을 본다. 내 소유 디렉터리가 `u+wx`를 잃은 것도 본다. 레이크가 아직 없으면 가장 가까운 상위 디렉터리를 본다.
 - **탈출구**: `SDC_RUN_AS_ROOT=1`이면 모든 wrapper가 예전처럼 root로 돌리고 검사도 건너뛴다 (릴리스 없이 되돌린다). KR 두 wrapper는 옛 이름 `SDC_KR_EXPORT_RUN_AS_ROOT=1`도 같은 뜻으로 받는다. 값은 0 또는 1이다 (다르면 종료 코드 2).
 - **HOME=/tmp**: uid가 passwd에 없어 `HOME`이 `/`가 되므로 준다. dolt 전역 설정(`~/.dolt`)과 임시 파일이 컨테이너 안 `/tmp`에 생기고 컨테이너와 같이 사라진다. `/app`·`/usr/local/bin`은 읽기·실행만 하면 된다. exchange_calendars·DuckDB(`output/duckdb_tmp`)·`tempfile`은 non-root로 검증했다.
-- **`/state`**: US 작업은 쓰지 않는다 (KIS 토큰 캐시는 `flows-sync-kis.sh`만 쓴다).
+- **`/state`**: US 작업은 쓰지 않는다. KIS 토큰 캐시(`state/kis_token.json`)는 `flows-sync-kis.sh`·`flows-sync-kis-status.sh`만 쓴다 — 두 wrapper도 이제 호출자 uid로 돈다 (아래).
 - **lock**: `/tmp/sdc-locks`의 flock 파일은 호스트에서 whi가 만든다 (컨테이너와 무관).
 - **배포 전에 한 번**: 위 경로를 root 권한으로 whi 소유로 바꿔야 한다. 안 바꾸고 배포하면 73으로 막혀 잡이 실패한다. 절차는 릴리스 노트의 배포 순서를 따른다 (`kr/` 이하와 `us/` 전체).
-- 같은 문제가 남은 wrapper: `flows-sync-kis.sh`(`state/kis_token.json`이 root 소유). 아직 고치지 않았다.
+- 같은 문제가 남은 wrapper: 없다. `flows-sync-kis.sh`·`flows-sync-kis-status.sh`도 호출자 uid로 돈다 (아래 절).
+
+### KIS 토큰 캐시 소유권 (배포 전에 한 번)
+
+`flows-sync-kis.sh`와 `flows-sync-kis-status.sh`는 `sdc_prepare_kis_run`(`lib/sdc-wrapper.sh`)으로 컨테이너를 `--user <uid>:<gid> -e HOME=/tmp`로 돌린다. 컨테이너를 띄우기 전에 두 가지를 본다. 하나라도 안 되면 **종료 코드 73**으로 멈추고 토큰을 발급하지 않는다.
+
+1. `state/kis_token.json`이 있으면 호출자가 읽을 수 있다. (못 읽으면 `KisTokenCache.load`가 PermissionError를 "캐시 없음"으로 삼켜 새 토큰을 발급한다 — 카카오톡 알림.)
+2. `state/` 디렉터리에 호출자가 쓸 수 있다. (캐시는 임시 파일을 만들고 `os.replace`로 바꾼다. 못 쓰면 발급만 하고 저장에 실패한다.)
+
+탈출구는 `SDC_RUN_AS_ROOT=1`이다(검사도 건너뛴다). 값은 0 또는 1이고 다르면 종료 코드 2다.
+
+서버에서 **한 번** 한다 (이미지 배포 전, 두 wrapper를 배포하기 전에). 이 저장소에서는 실행하지 않았다.
+
+```bash
+# 소유자와 모드를 먼저 본다 (토큰 값은 출력하지 않는다)
+ssh whi@sj2-server 'stat -c "%U:%G %a %n" /home/whi/apps/sdc/state /home/whi/apps/sdc/state/kis_token.json /home/whi/apps/sdc/state/.kis_token.* 2>/dev/null'
+# root 소유면 whi로 바꾼다 (파일 내용·모드 0600은 그대로, mtime도 그대로)
+ssh whi@sj2-server 'sudo chown -R whi:whi /home/whi/apps/sdc/state'
+# 확인: 둘 다 whi:whi, 파일은 600
+ssh whi@sj2-server 'stat -c "%U:%G %a %n" /home/whi/apps/sdc/state /home/whi/apps/sdc/state/kis_token.json'
+```
+
+**토큰 재발급 위험 판단.** `chown`은 파일 내용과 만료 시각을 바꾸지 않으므로 캐시는 그대로 유효하다. 소유자만 whi가 되고 모드는 0600이라 whi가 읽는다. 그래서 변경 자체와 배포 첫 실행은 재발급을 일으키지 않는다 (남은 시간이 `KIS_TOKEN_REFRESH_MARGIN_SECONDS`, 기본 3,600초보다 많으면 캐시를 쓴다. 적으면 평소처럼 하루 한 번 발급한다 — 옛 root 실행도 같았다). 위험이 생기는 경우는 둘이다.
+
+- **chown을 하지 않고 wrapper만 배포**: 사전 검사가 73으로 막는다. 발급도 수집도 없다. 잡은 실패로 보이지만 알림은 가지 않는다.
+- **chown 뒤에 누군가 `SDC_RUN_AS_ROOT=1`로 한 번 돌림**: 컨테이너가 root라 토큰이 갱신되면 `kis_token.json`이 다시 root 0600이 된다. 다음 whi 실행은 73으로 멈춘다. 그때 같은 `chown`을 한 번 더 한다.
 
 ## 현재 schedule에서 특히 헷갈리기 쉬운 점
 
