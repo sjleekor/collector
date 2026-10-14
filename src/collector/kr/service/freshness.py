@@ -15,6 +15,7 @@ the calendar says it should be", not "did any run fail".
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
@@ -25,7 +26,9 @@ from collector.kr.ports.storage import Storage
 from collector.kr.service.sync_krx_flows import (
     DISCONTINUED_FLOW_METRICS,
     FLOW_METRIC_GROUPS,
+    METRIC_PUBLICATION_LAG_SESSIONS,
     active_flow_metrics,
+    same_session_flow_metrics,
 )
 from collector.kr.util.time import now_kst, today_kst
 
@@ -83,7 +86,12 @@ def flow_latest_dates(storage: Storage) -> tuple[dict[str, date], dict[str, date
         # Over the metrics still collected, not every metric ever defined: a
         # discontinued metric's frozen date would otherwise become the group's
         # date, since the group is a minimum.
-        dates = [flow_metric_latest_dates.get(metric) for metric in active_flow_metrics(group)]
+        #
+        # Metrics with a publication lag are left out for the same reason: they
+        # are judged one by one in evaluate_staleness, against their own lag.
+        # A group made only of such metrics falls back to all of them.
+        metrics = same_session_flow_metrics(group) or active_flow_metrics(group)
+        dates = [flow_metric_latest_dates.get(metric) for metric in metrics]
         present_dates = [item for item in dates if item is not None]
         flow_group_latest_dates[group] = min(present_dates) if present_dates else None
     return flow_metric_latest_dates, flow_group_latest_dates
@@ -218,12 +226,21 @@ def evaluate_staleness(
     max_market_cap_lag_trading_days: int = DEFAULT_MAX_MARKET_CAP_LAG_TRADING_DAYS,
     max_lag_calendar_days: int = DEFAULT_MAX_LAG_CALENDAR_DAYS,
     holidays: set[date] | None = None,
+    metric_publication_lag_sessions: Mapping[str, int] | None = None,
 ) -> list[StaleFinding]:
     """Return the domains in *report* that are behind their freshness budget.
 
     An empty list means every domain is current. A domain with no rows at all
     counts as stale rather than as "nothing to check" — an empty table is the
     loudest possible version of the problem, not an exemption from it.
+
+    ``metric_publication_lag_sessions`` maps a flow metric to the sessions its
+    source needs to publish it (default
+    :data:`METRIC_PUBLICATION_LAG_SESSIONS`; the short-selling balance is 3).
+    Such a metric is checked on its own against ``max_lag_trading_days + lag``
+    sessions, and only when its group is in the report. At the default lag a
+    day on which KRX publishes the balance one session late (3 sessions after
+    the measurement date) is reported as stale.
     """
     as_of = as_of or today_kst()
     findings: list[StaleFinding] = []
@@ -260,6 +277,23 @@ def evaluate_staleness(
             # be a way to turn a gate off.
             continue
         check(f"krx_security_flow_raw:{group}", latest, trading_threshold, "trading")
+
+    publication_lags = (
+        METRIC_PUBLICATION_LAG_SESSIONS
+        if metric_publication_lag_sessions is None
+        else metric_publication_lag_sessions
+    )
+    for group in sorted(report.flow_group_latest_dates):
+        for metric in active_flow_metrics(group):
+            lag = publication_lags.get(metric)
+            if lag is None:
+                continue
+            check(
+                f"krx_security_flow_raw:{metric}",
+                report.flow_metric_latest_dates.get(metric),
+                _trading_day_threshold(as_of, max_lag_trading_days + lag, holidays),
+                "trading",
+            )
 
     for row in sorted(report.common_series, key=lambda item: item.series_id):
         if row.source in TRADING_DAY_SOURCES:

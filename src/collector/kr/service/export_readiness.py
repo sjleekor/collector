@@ -34,7 +34,12 @@ from collector.kr.domain.enums import RunStatus, RunType
 from collector.kr.domain.models import IngestionRun
 from collector.kr.infra.calendar.trading_days import get_trading_days
 from collector.kr.service.freshness import flow_latest_dates
-from collector.kr.service.sync_krx_flows import FLOW_METRIC_GROUPS, active_flow_metrics
+from collector.kr.service.sync_krx_flows import (
+    FLOW_METRIC_GROUPS,
+    METRIC_PUBLICATION_LAG_SESSIONS,
+    SHORTING_BALANCE_METRIC,
+    active_flow_metrics,
+)
 from collector.kr.util.time import KST
 
 VERDICT_READY = "ready"
@@ -126,6 +131,11 @@ class ReadinessConfig:
     as_of: datetime
     min_ticker_ratio: float = DEFAULT_MIN_TICKER_RATIO
     flow_max_lag_trading_days: int = DEFAULT_FLOW_MAX_LAG_TRADING_DAYS
+    #: Sessions between a short-selling balance measurement date and its
+    #: publication. The balance must reach K minus (flow lag + this).
+    short_balance_publication_lag_sessions: int = METRIC_PUBLICATION_LAG_SESSIONS[
+        SHORTING_BALANCE_METRIC
+    ]
     required_run_types: tuple[RunType, ...] = DEFAULT_REQUIRED_RUN_TYPES
     #: Per-run-type overrides of the expected-since time.
     run_since_overrides: tuple[tuple[RunType, datetime], ...] = ()
@@ -197,8 +207,8 @@ def _check_prices(storage: ReadinessStorage, cfg: ReadinessConfig) -> dict[str, 
     }
 
 
-def _flow_required_date(cfg: ReadinessConfig) -> date:
-    lag = max(0, cfg.flow_max_lag_trading_days)
+def _flow_required_date(cfg: ReadinessConfig, extra_lag: int = 0) -> date:
+    lag = max(0, cfg.flow_max_lag_trading_days) + max(0, extra_lag)
     if lag == 0:
         return cfg.feature_asof_date
     k = cfg.feature_asof_date
@@ -212,7 +222,7 @@ def _flow_required_date(cfg: ReadinessConfig) -> date:
 
 def _check_flows(storage: ReadinessStorage, cfg: ReadinessConfig) -> dict[str, Any]:
     required = _flow_required_date(cfg)
-    _, group_latest = flow_latest_dates(storage)  # type: ignore[arg-type]
+    metric_latest, group_latest = flow_latest_dates(storage)  # type: ignore[arg-type]
     groups: dict[str, dict[str, Any]] = {}
     status = "ok"
     reasons: list[str] = []
@@ -228,12 +238,34 @@ def _check_flows(storage: ReadinessStorage, cfg: ReadinessConfig) -> dict[str, A
                 f"flow group {group} latest={_iso(latest)} is older than " f"{required.isoformat()}"
             )
         groups[group] = {"latest": _iso(latest), "status": group_status}
+
+    # Metrics published with a lag are judged on their own, not through the
+    # group date, which leaves them out.
+    metrics: dict[str, dict[str, Any]] = {}
+    balance_required = _flow_required_date(cfg, cfg.short_balance_publication_lag_sessions)
+    if SHORTING_BALANCE_METRIC in active_flow_metrics("shorting"):
+        latest = metric_latest.get(SHORTING_BALANCE_METRIC)
+        metric_status = "ok"
+        if latest is None or latest < balance_required:
+            metric_status = VERDICT_NOT_YET
+            status = VERDICT_NOT_YET
+            reasons.append(
+                f"flow metric {SHORTING_BALANCE_METRIC} latest={_iso(latest)} is older than "
+                f"{balance_required.isoformat()} "
+                f"(publication lag {cfg.short_balance_publication_lag_sessions} sessions)"
+            )
+        metrics[SHORTING_BALANCE_METRIC] = {
+            "latest": _iso(latest),
+            "required_at_or_after": balance_required.isoformat(),
+            "status": metric_status,
+        }
     return {
         "check": "flows",
         "status": status,
         "required_at_or_after": required.isoformat(),
         "flow_max_lag_trading_days": cfg.flow_max_lag_trading_days,
         "groups": groups,
+        "metrics": metrics,
         "reasons": reasons,
     }
 
@@ -329,6 +361,7 @@ def evaluate_export_readiness(storage: ReadinessStorage, cfg: ReadinessConfig) -
         "parameters": {
             "min_ticker_ratio": cfg.min_ticker_ratio,
             "flow_max_lag_trading_days": cfg.flow_max_lag_trading_days,
+            "short_balance_publication_lag_sessions": cfg.short_balance_publication_lag_sessions,
             "required_run_types": [rt.value for rt in cfg.required_run_types],
             "expected_since": {
                 rt.value: _expected_since(rt, cfg).isoformat() for rt in cfg.required_run_types
