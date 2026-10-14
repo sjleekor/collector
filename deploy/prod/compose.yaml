@@ -21,6 +21,14 @@ services:
   collector:
     image: ghcr.io/sjleekor/collector:v0.16.0
     profiles: ["manual"]
+    # 중단 신호 (2026-10-07). Cronicle은 abort 때 TERM을 보내고 child_kill_timeout
+    # 10초 뒤 KILL을 보낸다. wrapper가 `docker stop -t 5`로 컨테이너를 세우므로
+    # 정지 유예는 그 안에 끝나게 5초로 둔다 (wrapper의 SDC_STOP_GRACE_SECONDS 기본값과 같다).
+    # init: true — 이전에는 Python이 PID 1이라 TERM의 기본 동작이 없어 신호가 무시됐다.
+    # tini가 PID 1이 되어 TERM을 Python에 넘기고 자식도 거둔다.
+    init: true
+    stop_signal: SIGTERM
+    stop_grace_period: 5s
     depends_on:
       db:
         condition: service_healthy

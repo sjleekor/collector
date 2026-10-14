@@ -198,6 +198,32 @@ source lock은 `/tmp/sdc-locks/<domain>.lock`에 `flock`을 걸고, lock 획득 
 | **`us`** | **`us-daily.sh`** | **0s** — 원천별 간격은 각 클라이언트 안에 있다 (SEC 5s · FINRA·Wikipedia·FRED 1s · Nasdaq 1.5s) |
 | **`us_nasdaq_analyst`** | **`us-nasdaq-analyst.sh`** | **0s** — 종목당 간격(기본 5초)이 Python 클라이언트 안에 있다. `us`와 다른 도메인을 쓰는 이유는 위 "`sdc_daily_us_nasdaq_analyst`" 절 참고 |
 
+### 중단 신호와 중단 훈련 (2026-10-07)
+
+Cronicle abort는 이벤트 스크립트의 자식 pid 하나에 TERM을 보내고, `child_kill_timeout` 10초 뒤 KILL을 보낸다. 프로세스 그룹에는 보내지 않는다.
+
+| | 전 | 후 |
+|---|---|---|
+| wrapper | `docker compose run`을 포그라운드로 불러 TERM trap이 compose가 끝난 뒤에야 돌았다 | 백그라운드로 띄우고 `wait`한다. TERM·INT를 받으면 바로 `docker stop -t 5 <컨테이너>` 후 `docker rm -f`, 종료 코드 143(INT는 130) |
+| 컨테이너 | Python이 PID 1이라 TERM이 무시됐다 | `init: true`(tini)가 PID 1이라 TERM을 Python에 넘긴다. `stop_signal: SIGTERM`, `stop_grace_period: 5s` |
+
+grace 5초인 이유: wrapper가 신호를 받은 뒤 `docker stop`(최대 5초) + compose 정리 대기(최대 2초) + `docker rm`이 Cronicle의 10초 안에 끝나야 하기 때문이다. `SDC_STOP_GRACE_SECONDS`로 wrapper 쪽 값을 바꿀 수 있다. 컨테이너 안 Python이 5초 안에 못 끝나면 KILL된다.
+
+**이 변경은 Cronicle 이벤트 스크립트가 wrapper를 `exec`로 부를 때만 끝까지 이어진다.** `exec` 없이 부르면 TERM은 이벤트 스크립트 bash에만 가고 wrapper는 신호를 받지 못한다 (이 경우 다음 실행의 고아 컨테이너 수거가 여전히 유일한 정리다).
+
+#### 배포 뒤 중단 훈련 (실행은 배포 담당자가, 코드 변경 때는 하지 않는다)
+
+1. 이미지·compose·wrapper가 배포됐는지 본다: `grep -n 'init: true' ~/apps/sdc/compose.yaml`, `grep -n _sdc_on_stop_signal ~/apps/sdc/bin/lib/sdc-wrapper.sh`.
+2. 데이터를 건드리지 않는 오래 도는 테스트 이벤트를 하나 만든다. 이벤트 스크립트는 `exec ~/apps/sdc/bin/<wrapper>.sh ...` 형태여야 한다. 실제 수집 wrapper(예: `us-derive-daily.sh --dry-run`)나, 컨테이너만 띄워 `sleep`하는 확인용 명령을 쓴다. 락 도메인이 운영 이벤트와 겹치지 않게 한다.
+3. 실행해서 컨테이너가 뜬 것을 본다: `docker ps --filter name=sdc-collector- --format '{{.Names}} {{.Status}}'`.
+4. Cronicle에서 그 job을 Abort 하고 시간을 잰다.
+5. 확인한다.
+   - 10초 안에 `docker ps --filter name=sdc-collector-`에 컨테이너가 없다.
+   - job 로그 끝에 `signal TERM received; stopping sdc-collector-<도메인>`과 `lock released ... status=143`이 있다.
+   - `docker ps -a`에 `Exited` 잔재가 없다 (`--rm`).
+   - `/tmp/sdc-locks/<도메인>.lock`을 바로 다시 잡을 수 있다 (같은 이벤트를 즉시 재실행해 `lock acquired`).
+6. 실패하면(컨테이너가 남으면) `exec` 여부와 Cronicle `child_kill_timeout`을 먼저 본다. 남은 컨테이너는 `docker rm -f sdc-collector-<도메인>`으로 치운다.
+
 ### KRX 요청 페이스 (2026-08-16 정정)
 
 **`data.krx.co.kr`을 때리는 모든 수집기는 하나의 정책을 쓴다.** 어떤 라이브러리를
