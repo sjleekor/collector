@@ -721,7 +721,10 @@ def default_common_feature_series() -> list[CommonFeatureSeries]:
             },
             availability_policy="next_krx_session",
             source_timezone="Asia/Seoul",
-            history_start_date=date(2001, 1, 1),
+            # ECOS StatisticSearch first daily observation, measured 2026-10-07 on
+            # sj2 (1998-11-13, no gap over 7 days to 2014). 2001-01-01 cut the MRS
+            # backfill short; the frozen MRS registration asks for 1998-11-13.
+            history_start_date=date(1998, 11, 13),
             max_stale_business_days=DAILY_MAX_STALE_BUSINESS_DAYS,
             default_transform="level",
             notes=(
