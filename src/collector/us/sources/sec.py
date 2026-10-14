@@ -78,25 +78,23 @@ def financial_statements_url(year: int, quarter: int) -> str:
     return f"{BASE}/files/dera/data/financial-statement-data-sets/{year}q{quarter}.zip"
 
 
-#: 목록 페이지가 규칙과 다른 경로로 거는 분기. **디렉터리가 바뀌는 중이다** —
-#: 82개 링크 중 최신 분기 하나만 ``datastandardsinnovation``을 가리키고 나머지는
-#: 전부 ``structureddata``다 (2026-09-19 실측). 규칙대로 만든 URL은 404다.
-#: 새 분기가 또 404면 목록 페이지의 ``href``를 먼저 본다 — MIDAS와 같은 일이다.
-INSIDER_URL_EXCEPTIONS: dict[tuple[int, int], str] = {
-    (2026, 2): (
-        f"{BASE}/files/datastandardsinnovation/data/insider-transactions-data-sets/"
-        "2026q2_form345.zip"
-    ),
-}
+#: 내부자 ZIP 디렉터리가 **2026q2부터 ``datastandardsinnovation``으로 바뀌었다.**
+#: 목록 페이지 링크 83개 중 2026q2·q3 둘만 새 디렉터리고 2026q1까지 81개는
+#: ``structureddata``다. 반대쪽 경로는 둘 다 404다 — 2026q3·q2의 옛 경로,
+#: 2026q1·2018q3의 새 경로 (2026-10-10 sj2-server 실측). 2026-09-19에는 최신
+#: 분기 하나만 새 디렉터리라 예외표로 막았는데, 2026q3도 새 디렉터리로만 나와
+#: 규칙을 바꿨다. 예외표 때는 2026q3를 "발표 전"으로 넘겨 유예(90일)가 끝날
+#: 때까지 조용히 빠져 있었다. 새 분기가 또 404면 목록 페이지의 ``href``를 먼저 본다.
+INSIDER_NEW_DIR_FROM: tuple[int, int] = (2026, 2)
 
 
 def insider_url(year: int, quarter: int) -> str:
-    """내부자 거래 Form 3·4·5. **규칙으로 만들되 예외표를 먼저 본다.**"""
-    if (year, quarter) in INSIDER_URL_EXCEPTIONS:
-        return INSIDER_URL_EXCEPTIONS[(year, quarter)]
+    """내부자 거래 Form 3·4·5. 디렉터리는 :data:`INSIDER_NEW_DIR_FROM`이 가른다."""
+    directory = (
+        "datastandardsinnovation" if (year, quarter) >= INSIDER_NEW_DIR_FROM else "structureddata"
+    )
     return (
-        f"{BASE}/files/structureddata/data/insider-transactions-data-sets/"
-        f"{year}q{quarter}_form345.zip"
+        f"{BASE}/files/{directory}/data/insider-transactions-data-sets/{year}q{quarter}_form345.zip"
     )
 
 
