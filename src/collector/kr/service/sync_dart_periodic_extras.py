@@ -84,12 +84,19 @@ DEFAULT_STATEMENTS: tuple[PeriodicExtraStatement, ...] = (
 def resolve_target_years(
     statement_type: PeriodicExtraStatement,
     bsns_years: list[int],
+    *,
+    exact_years: bool = False,
 ) -> list[int]:
     """Thin *bsns_years* down to the requests that actually add coverage.
 
     Args:
         statement_type: Which disclosure is being collected.
         bsns_years: Every year the caller wants covered.
+        exact_years: Request every year in *bsns_years* and skip the thinning.
+            Thinning is lossless for *coverage* but not for point-in-time use:
+            a year answered only as 전기/전전기 of a later report carries that
+            later report's ``rcept_no``, so it becomes visible two years late.
+            The audit opinion needs each year's own report, hence this switch.
 
     Returns:
         The subset to request, newest first. Newest first matters: the most
@@ -99,7 +106,7 @@ def resolve_target_years(
     """
     if not bsns_years:
         return []
-    step = max(1, YEAR_STEP.get(statement_type, 1))
+    step = 1 if exact_years else max(1, YEAR_STEP.get(statement_type, 1))
     ordered = sorted(set(bsns_years), reverse=True)
     if step == 1:
         return ordered
@@ -137,6 +144,7 @@ def sync_dart_periodic_extras(
     scope: UniverseScope = UniverseScope.HISTORICAL,
     flush_every: int = 200,
     no_data_ttl_days: int | None = None,
+    exact_years: bool = False,
 ) -> DartPeriodicExtrasSyncResult:
     """Synchronise DS002 periodic-report extras into the two raw tables.
 
@@ -159,6 +167,9 @@ def sync_dart_periodic_extras(
             periodically is the point: the ledger has to survive a run that
             stops on the daily key limit.
         no_data_ttl_days: Override the ledger's no-data expiry.
+        exact_years: Request exactly *bsns_years* for every statement instead of
+            thinning them (see :func:`resolve_target_years`). Slice keys are the
+            same, so years already in the ledger are skipped.
 
     Returns:
         ``DartPeriodicExtrasSyncResult``. Never raises for an upstream failure.
@@ -175,9 +186,12 @@ def sync_dart_periodic_extras(
             "tickers": tickers,
             "rate_limit_seconds": rate_limit_seconds,
             "force": force,
+            "exact_years": exact_years,
             "universe_scope": scope.value,
             "target_years": {
-                statement.value: resolve_target_years(statement, bsns_years)
+                statement.value: resolve_target_years(
+                    statement, bsns_years, exact_years=exact_years
+                )
                 for statement in statements
             },
         },
@@ -207,7 +221,9 @@ def sync_dart_periodic_extras(
         keys: list[str] = []
         for corp in targets:
             for statement in statements:
-                for bsns_year in resolve_target_years(statement, bsns_years):
+                for bsns_year in resolve_target_years(
+                    statement, bsns_years, exact_years=exact_years
+                ):
                     for reprt_code in reprt_codes:
                         requests.append((corp, bsns_year, reprt_code, statement))
                         keys.append(

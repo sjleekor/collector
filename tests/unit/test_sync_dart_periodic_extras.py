@@ -470,3 +470,128 @@ def test_force_recollects_everything_but_still_writes_the_ledger() -> None:
 
     assert len(provider.calls) == 1
     assert storage.slice_writes
+
+
+# --------------------------------------------------------------------------
+# exact years — audit opinion for each year's own report (point-in-time)
+# --------------------------------------------------------------------------
+
+# Shaped after the live accnutAdtorNmNdAdtOpinion response: 당기 / 전기 / 전전기
+# in one response, all carrying the receipt number of the filed report.
+AUDIT_ROWS_FY2024 = [
+    {
+        "rcept_no": "20250312000111",
+        "stlm_dt": "2024-12-31",
+        "bsns_year": "제56기(당기)",
+        "adt_opinion": "적정의견",
+    },
+    {
+        "rcept_no": "20250312000111",
+        "stlm_dt": "2024-12-31",
+        "bsns_year": "제55기(전기)",
+        "adt_opinion": "적정의견",
+    },
+    {
+        "rcept_no": "20250312000111",
+        "stlm_dt": "2024-12-31",
+        "bsns_year": "제54기(전전기)",
+        "adt_opinion": "적정의견",
+    },
+]
+AUDIT = PeriodicExtraStatement.AUDIT_OPINION
+ODD_YEARS = list(range(2015, 2026, 2))
+EVEN_YEARS = [2016, 2018, 2020, 2022, 2024]
+
+
+def test_default_thinning_requests_only_odd_years_for_audit_opinion() -> None:
+    # This is why the lake has FY2015, 2017, ..., 2025 request years only.
+    assert resolve_target_years(AUDIT, list(range(2015, 2026))) == sorted(ODD_YEARS, reverse=True)
+
+
+def test_exact_years_requests_every_given_year() -> None:
+    assert resolve_target_years(AUDIT, EVEN_YEARS, exact_years=True) == [
+        2024,
+        2022,
+        2020,
+        2018,
+        2016,
+    ]
+    # A contiguous range is where thinning bites: 11 years cost 6 requests.
+    contiguous = list(range(2015, 2026))
+    assert resolve_target_years(AUDIT, contiguous, exact_years=True) == sorted(
+        contiguous, reverse=True
+    )
+
+
+class _AuditProvider:
+    def __init__(self) -> None:
+        self.calls: list[int] = []
+
+    def fetch_periodic_extra(self, corp, bsns_year, reprt_code, statement_type):
+        self.calls.append(bsns_year)
+        return parse_periodic_extra_response(
+            _payload(AUDIT_ROWS_FY2024), corp, bsns_year, reprt_code, statement_type
+        )
+
+
+def test_exact_years_requests_one_slice_per_year_and_keeps_each_report_rcept_no() -> None:
+    storage = _FakeStorage()
+    provider = _AuditProvider()
+
+    result = _sync(
+        storage,
+        provider,
+        bsns_years=EVEN_YEARS,
+        statements=[AUDIT],
+        exact_years=True,
+    )
+
+    assert provider.calls == [2024, 2022, 2020, 2018, 2016]
+    assert result.requests_attempted == 5
+    # Three rows per response (당기/전기/전전기), stored under the request year.
+    assert len(storage.upserted) == 15
+    assert {row.bsns_year for row in storage.upserted} == set(EVEN_YEARS)
+    assert storage.runs[0].params["exact_years"] is True
+    assert storage.runs[0].params["target_years"]["audit_opinion"] == [
+        2024,
+        2022,
+        2020,
+        2018,
+        2016,
+    ]
+
+
+def test_exact_years_skips_odd_years_already_in_the_ledger() -> None:
+    # A full range with exact_years only pays for the years the odd-year
+    # backfill never requested.
+    storage = _FakeStorage()
+    provider = _AuditProvider()
+    first = _sync(
+        storage, provider, bsns_years=ODD_YEARS, statements=[AUDIT], exact_years=False
+    )
+    assert first.requests_attempted == len(ODD_YEARS)
+
+    second_provider = _AuditProvider()
+    second = _sync(
+        storage,
+        second_provider,
+        bsns_years=list(range(2015, 2026)),
+        statements=[AUDIT],
+        exact_years=True,
+    )
+
+    assert sorted(second_provider.calls) == [2016, 2018, 2020, 2022, 2024]
+    assert second.requests_skipped == len(ODD_YEARS)
+
+
+def test_odd_year_rows_are_unchanged_by_an_exact_years_run() -> None:
+    # Different request year and different rcept_no than any odd-year row, so
+    # the UNIQUE key cannot collide with what is already stored.
+    storage = _FakeStorage()
+    _sync(storage, _AuditProvider(), bsns_years=[2023], statements=[AUDIT])
+    before = list(storage.upserted)
+
+    _sync(storage, _AuditProvider(), bsns_years=[2024], statements=[AUDIT], exact_years=True)
+
+    assert storage.upserted[: len(before)] == before
+    assert {row.bsns_year for row in storage.upserted[len(before) :]} == {2024}
