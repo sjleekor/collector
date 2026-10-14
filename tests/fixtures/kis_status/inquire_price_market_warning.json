@@ -1,0 +1,24 @@
+{
+  "_fixture_note": "합성. mrkt_warn_cls_code=02는 아직 실측한 적이 없다(양성 사례 검증 대상).",
+  "rt_cd": "0",
+  "msg_cd": "MCA00000",
+  "msg1": "정상처리 되었습니다.",
+  "output": {
+    "stck_prpr": "8800",
+    "stck_oprc": "273000",
+    "acml_vol": "21669476",
+    "per": "12.34",
+    "pbr": "1.23",
+    "frgn_hldn_qty": "2736287683",
+    "hts_frgn_ehrt": "46.80",
+    "iscd_stat_cls_code": "53",
+    "marg_rate": "20.00",
+    "crdt_able_yn": "Y",
+    "mang_issu_cls_code": "N",
+    "temp_stop_yn": "N",
+    "mrkt_warn_cls_code": "02",
+    "invt_caful_yn": "N",
+    "short_over_yn": "N",
+    "sltr_yn": "N"
+  }
+}

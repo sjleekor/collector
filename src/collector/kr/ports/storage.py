@@ -40,6 +40,7 @@ from collector.kr.domain.models import (
     SecurityFlowLine,
     Stock,
     StockMetricFact,
+    StockStatusRecord,
     StockUniverseSnapshot,
     UpsertResult,
 )
@@ -333,6 +334,21 @@ class Storage(Protocol):
         records: list[SecurityFlowLine],
     ) -> UpsertResult:
         """Upsert KRX security-flow raw rows."""
+        ...
+
+    def upsert_kis_stock_status(
+        self,
+        records: list[StockStatusRecord],
+    ) -> UpsertResult:
+        """Insert KIS status-flag rows; an existing ``(snapshot_date, ticker)`` stays.
+
+        ``result.inserted`` counts rows actually written. The first observation
+        of a day is kept so a re-run that fills holes cannot rewrite it.
+        """
+        ...
+
+    def get_kis_stock_status_tickers(self, snapshot_date: date) -> set[str]:
+        """Return tickers that already have a status row for ``snapshot_date``."""
         ...
 
     def count_krx_security_flow_daily_market_tickers(
