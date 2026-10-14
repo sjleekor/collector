@@ -593,6 +593,10 @@ class PostgresStorage:
                     for record in records
                 ]
 
+                # market keeps the stored value when the record has none: delisted
+                # companies arrive as market=None, and modeler's metric_vintages corp
+                # CTE filters on market IS NOT NULL (no is_active filter, to avoid
+                # survivor bias), so overwriting would drop them from the marts.
                 _execute_values_counted(
                     cur,
                     """
@@ -611,7 +615,7 @@ class PostgresStorage:
                     ON CONFLICT (corp_code) DO UPDATE SET
                         ticker = EXCLUDED.ticker,
                         corp_name = EXCLUDED.corp_name,
-                        market = EXCLUDED.market,
+                        market = COALESCE(EXCLUDED.market, dart_corp_master.market),
                         stock_name = EXCLUDED.stock_name,
                         modify_date = EXCLUDED.modify_date,
                         is_active = EXCLUDED.is_active,
@@ -1011,14 +1015,35 @@ class PostgresStorage:
                 cur.execute(sql, tuple(params))
                 return {(row[0], row[1], row[2], row[3]) for row in cur.fetchall()}
 
-    def get_last_successful_run(self, run_type: RunType) -> IngestionRun | None:
-        """Return the most recent SUCCESS-status run for the given run_type, or None."""
+    def get_last_successful_run(
+        self,
+        run_type: RunType,
+        *,
+        positive_count: str | None = None,
+    ) -> IngestionRun | None:
+        """Return the most recent SUCCESS-status run for the given run_type, or None.
+
+        When ``positive_count`` is given, only runs whose ``counts->>positive_count``
+        is a positive integer qualify.  The CASE keeps the bigint cast from running
+        on non-numeric values (SQL does not guarantee AND short-circuiting).
+        """
         import json
+
+        count_filter = ""
+        count_params: tuple[str, ...] = ()
+        if positive_count is not None:
+            count_filter = """
+                      AND CASE
+                            WHEN counts->>%s ~ '^[0-9]{1,18}$'
+                            THEN (counts->>%s)::bigint
+                            ELSE 0
+                          END > 0"""
+            count_params = (positive_count, positive_count)
 
         with get_connection(self._dsn) as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     SELECT
                         run_id,
                         run_type,
@@ -1030,11 +1055,11 @@ class PostgresStorage:
                         error_summary
                     FROM ingestion_runs
                     WHERE run_type = %s
-                      AND status = %s
+                      AND status = %s{count_filter}
                     ORDER BY started_at DESC
                     LIMIT 1
                     """,
-                    (run_type.value, RunStatus.SUCCESS.value),
+                    (run_type.value, RunStatus.SUCCESS.value, *count_params),
                 )
                 row = cur.fetchone()
                 if row is None:
