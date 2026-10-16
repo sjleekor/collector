@@ -97,7 +97,12 @@ sdc_run_collector() {
   trap '_sdc_on_stop_signal TERM' TERM
   trap '_sdc_on_stop_signal INT' INT
   # 백그라운드 명령은 비대화 셸에서 stdin이 /dev/null이 되므로 `<&0`으로 그대로 잇는다.
-  sdc_compose run --rm "${name_args[@]}" "${entry_args[@]}" "${extra_args[@]}" "$SDC_COLLECTOR_SERVICE" "$@" <&0 &
+  # compose를 함수(sdc_compose)로 띄우면 `$!`가 함수를 도는 하위 셸이 되고, 그 하위 셸이
+  # compose를 exec로 바꾸는지는 bash 버전마다 다르다(5.3은 바꾸고 Ubuntu CI의 bash는 안 바꿔
+  # TERM이 compose에 안 닿았다 — 2026-10-16 v0.17.0 CI). 배열로 직접 띄워 `$!`가 compose 자신이게 한다.
+  local -a compose_cmd
+  read -r -a compose_cmd <<< "$SDC_DOCKER_COMPOSE_CMD"
+  "${compose_cmd[@]}" run --rm "${name_args[@]}" "${entry_args[@]}" "${extra_args[@]}" "$SDC_COLLECTOR_SERVICE" "$@" <&0 &
   _sdc_run_pid=$!
 
   local rc=0
