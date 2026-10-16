@@ -298,7 +298,7 @@ grace 5초인 이유: wrapper가 신호를 받은 뒤 `docker stop`(최대 5초)
 
 `flows-sync.sh.bak.20260425_2352`는 배포 디렉터리에 남아 있는 backup 파일이며 Cronicle event에서 호출하지 않는다.
 
-## 가격 vintage 트리거 `kr-price-vintage-trigger.sh` (2026-10-07 초안 · **Cronicle 미등록**)
+## 가격 vintage 트리거 `kr-price-vintage-trigger.sh` (2026-10-07 초안 · **2026-10-16 Cronicle 등록** `sdc_weekly_kr_price_vintage_trigger` 토 09:30)
 
 `daily_ohlcv`는 naver 조정 시계열이라 액면분할·병합이 생기면 과거 전체가 다시 쓰이는데, 증분 수집은 마지막 날짜 뒤만 받는다.
 이 잡이 **재수집 대상을 골라 목록만 남긴다. 재수집은 하지 않는다** — `prices backfill --refetch`는 사람이 목록을 보고 승인한 뒤 따로 돌린다.
