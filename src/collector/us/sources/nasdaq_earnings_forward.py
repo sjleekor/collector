@@ -35,11 +35,10 @@ from collector.us.sources.nasdaq import (
     summarize_earnings,
 )
 
-#: 요청 간격 1.5초. 이 잡은 날짜당 1요청이고 한 번에 최대 약 71요청이라 간격을
-#: 5초로 두어도 6분이면 끝나지만, CLAUDE.md가 Nasdaq 실적 캘린더에 허용한 값이
-#: 1.5초이고 같은 호스트의 다른 잡(애널리스트, 종목당 1요청)이 5초로 오래 도는
-#: 것과 겹치지 않으므로 1.5초로 낮춘다. 요청 수가 적어 부담이 거의 없다.
-DEFAULT_INTERVAL_SECONDS = 1.5
+#: 요청 간격 5초. ``us-daily``의 실적 캘린더(``NasdaqClient`` 기본값)와 애널리스트 잡이
+#: 실제로 쓰는 값과 같다. 문서의 "Nasdaq 1.5초"는 backfill 때 좁힌 값이라 따르지 않는다.
+#: 날짜당 1요청이고 매일 약 10요청·주 1회 약 71요청이라 5초여도 1분·6분이면 끝난다.
+DEFAULT_INTERVAL_SECONDS = 5.0
 
 #: 날짜 하나가 실패할 때(타임아웃 등) 다시 시도하는 횟수. 애널리스트 잡과 같다.
 DEFAULT_MAX_RETRIES = 2

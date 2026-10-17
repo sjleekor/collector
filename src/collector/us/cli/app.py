@@ -548,7 +548,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         "--interval-seconds",
         type=float,
         default=None,
-        help="요청 간격 (기본 1.5초).",
+        help="요청 간격 (기본 5초).",
     )
     fwd_run.add_argument("--dry-run", action="store_true", help="할 일만 센다.")
     fwd_run.set_defaults(handler=_handle_nasdaq_earnings_forward_run)
