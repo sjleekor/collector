@@ -240,6 +240,7 @@ def _handle_nasdaq_earnings_forward_run(args: argparse.Namespace) -> None:
         interval_seconds=args.interval_seconds,
         max_retries=args.max_retries,
         dry_run=args.dry_run,
+        ignore_block=args.ignore_block,
     )
     _print(result)
     if not result["ok"]:
@@ -541,8 +542,13 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     fwd_run.add_argument(
         "--max-retries",
         type=int,
-        default=2,
-        help="날짜 하나가 실패할 때(타임아웃 등) 다시 시도하는 횟수.",
+        default=1,
+        help="네트워크 오류(시간 초과 등)만 다시 시도하는 횟수. HTTP·형식 오류는 다시 하지 않는다.",
+    )
+    fwd_run.add_argument(
+        "--ignore-block",
+        action="store_true",
+        help="쉬는 기한(_blocked.json) 안이어도 돌린다. 손으로 한 번 확인할 때만 쓴다.",
     )
     fwd_run.add_argument(
         "--interval-seconds",

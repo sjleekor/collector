@@ -1,4 +1,7 @@
-"""``us-nasdaq-earnings-forward run`` — 경로·날짜 선택·덮어쓰기 금지·종료 코드. 네트워크 없음."""
+"""``us-nasdaq-earnings-forward run`` — 경로·날짜·덮어쓰기 금지·막힘 처리·종료 코드.
+
+네트워크는 쓰지 않는다.
+"""
 
 from __future__ import annotations
 
@@ -6,6 +9,7 @@ import datetime as dt
 import json
 
 import pytest
+import requests
 
 from collector.cli.app import build_parser
 from collector.lake import DataRoot
@@ -14,17 +18,23 @@ from collector.us.sources import nasdaq_earnings_forward as fwd
 from collector.us.sources.nasdaq import NasdaqError
 
 OBSERVED = dt.date(2026, 10, 16)  # 금요일 (시험용 고정값 — 기본값이 아니다)
+NOW = dt.datetime(2026, 10, 16, 6, 30, tzinfo=dt.UTC)
 
 
 class FakeClient:
-    def __init__(self, bodies=None, fail=()):
+    def __init__(self, bodies=None, fail=(), timeouts=None):
         self.calls: list[str] = []
         self.bodies = bodies or {}
         self.fail = set(fail)
+        # 날짜별로 남은 시간 초과 횟수
+        self.timeouts = dict(timeouts or {})
 
     def get_json(self, url, params):
         d = params["date"]
         self.calls.append(d)
+        if self.timeouts.get(d, 0) > 0:
+            self.timeouts[d] -= 1
+            raise requests.Timeout(f"read timeout {d}")
         if d in self.fail:
             raise NasdaqError(f"403 {d}")
         return self.bodies.get(d, {"data": {"asOf": "x", "rows": [{"symbol": "AAPL"}]}})
@@ -92,14 +102,107 @@ def test_missing_data_key_is_error_and_writes_nothing(root):
     res = fwd.run_forward(root, horizon_days=3, observed=OBSERVED, client=client, max_retries=0)
     assert not res["ok"] and len(res["errors"]) == 1
     assert not fwd.forward_path(root, OBSERVED, dt.date(2026, 10, 19)).exists()
+    assert client.calls == ["2026-10-19"] and fwd.read_block(root) is not None
 
 
-def test_failure_keeps_going_and_reports_not_ok(root):
-    client = FakeClient(fail={"2026-10-19"})
-    res = fwd.run_forward(root, horizon_days=5, observed=OBSERVED, client=client, max_retries=1)
+def test_http_error_stops_run_and_writes_block(root):
+    client = FakeClient(fail={"2026-10-20"})
+    res = fwd.run_forward(root, horizon_days=7, observed=OBSERVED, client=client, now=NOW)
     assert not res["ok"]
-    assert client.calls.count("2026-10-19") == 2  # 재시도
-    assert fwd.forward_path(root, OBSERVED, dt.date(2026, 10, 20)).is_file()
+    # 실패한 날짜를 다시 하지 않고, 그 뒤 날짜도 받지 않는다
+    assert client.calls == ["2026-10-19", "2026-10-20"]
+    assert fwd.forward_path(root, OBSERVED, dt.date(2026, 10, 19)).is_file()
+    assert not fwd.forward_path(root, OBSERVED, dt.date(2026, 10, 21)).exists()
+    block = fwd.read_block(root)
+    assert block["consecutive"] == 1 and block["cooldown_days"] == 2
+    assert dt.datetime.fromisoformat(block["until"]) == NOW + dt.timedelta(days=2)
+    assert res["blocked_until"] == block["until"] and "403" in res["errors"][0]
+
+
+def test_within_cooldown_makes_no_request(root):
+    fwd.run_forward(
+        root, horizon_days=3, observed=OBSERVED, client=FakeClient(fail={"2026-10-19"}), now=NOW
+    )
+    later = FakeClient()
+    res = fwd.run_forward(
+        root,
+        horizon_days=14,
+        observed=dt.date(2026, 10, 17),
+        client=later,
+        now=NOW + dt.timedelta(days=1),
+    )
+    assert later.calls == []
+    assert res["ok"] and res["skipped_reason"] == "blocked" and res["dates_requested"] == 0
+
+
+def test_after_cooldown_success_clears_block(root):
+    fwd.run_forward(
+        root, horizon_days=3, observed=OBSERVED, client=FakeClient(fail={"2026-10-19"}), now=NOW
+    )
+    res = fwd.run_forward(
+        root,
+        horizon_days=3,
+        observed=dt.date(2026, 10, 19),
+        client=FakeClient(),
+        now=NOW + dt.timedelta(days=3),
+    )
+    assert res["ok"] and res["block_cleared"] and res["blocked_until"] is None
+    assert fwd.read_block(root) is None
+
+
+def test_repeated_failure_escalates_cooldown(root):
+    when = NOW
+    expected = [2, 4, 8, 16, 30, 30]
+    for days in expected:
+        fwd.run_forward(
+            root,
+            horizon_days=3,
+            observed=OBSERVED,
+            client=FakeClient(fail={"2026-10-19"}),
+            now=when,
+        )
+        block = fwd.read_block(root)
+        assert block["cooldown_days"] == days
+        when = dt.datetime.fromisoformat(block["until"])
+    assert block["consecutive"] == len(expected)
+
+
+def test_timeout_is_retried_once_then_blocks(root):
+    once = FakeClient(timeouts={"2026-10-19": 1})
+    res = fwd.run_forward(root, horizon_days=3, observed=OBSERVED, client=once, now=NOW)
+    assert res["ok"] and once.calls.count("2026-10-19") == 2 and fwd.read_block(root) is None
+
+    always = FakeClient(timeouts={"2026-10-20": 99})
+    res = fwd.run_forward(
+        root, horizon_days=7, observed=dt.date(2026, 10, 19), client=always, now=NOW
+    )
+    assert not res["ok"] and always.calls.count("2026-10-20") == 2
+    assert "Timeout" in res["errors"][0] and fwd.read_block(root)["consecutive"] == 1
+
+
+def test_ignore_block_runs_anyway(root):
+    fwd.run_forward(
+        root, horizon_days=3, observed=OBSERVED, client=FakeClient(fail={"2026-10-19"}), now=NOW
+    )
+    manual = FakeClient()
+    res = fwd.run_forward(
+        root,
+        horizon_days=3,
+        observed=dt.date(2026, 10, 17),
+        client=manual,
+        now=NOW + dt.timedelta(hours=1),
+        ignore_block=True,
+    )
+    assert manual.calls == ["2026-10-19", "2026-10-20"]
+    assert res["ok"] and fwd.read_block(root) is None
+
+
+def test_dry_run_reports_block_without_request(root):
+    fwd.run_forward(
+        root, horizon_days=3, observed=OBSERVED, client=FakeClient(fail={"2026-10-19"}), now=NOW
+    )
+    res = fwd.run_forward(root, horizon_days=3, observed=OBSERVED, dry_run=True, now=NOW)
+    assert res["blocked_until"] == fwd.read_block(root)["until"]
 
 
 def test_dry_run_makes_no_request(root):
@@ -115,6 +218,8 @@ def test_cli_defaults_and_overrides():
     a = _parse()
     assert a.handler is us_app._handle_nasdaq_earnings_forward_run
     assert a.horizon_days == 14 and a.observed_date is None and a.dry_run is False
+    assert a.max_retries == 1 and a.ignore_block is False
+    assert _parse("--ignore-block").ignore_block is True
     b = _parse(
         "--horizon-days",
         "100",
@@ -149,3 +254,4 @@ def test_handler_exit_code(tmp_path, monkeypatch, capsys, ok, code):
             args.handler(args)
         assert exc.value.code == code
     assert captured["horizon_days"] == 7 and captured["observed"] == dt.date(2026, 10, 16)
+    assert captured["ignore_block"] is False
