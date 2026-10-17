@@ -16,6 +16,7 @@ US_WRAPPERS = [
     "us-derive-daily.sh",
     "us-derive.sh",
     "us-nasdaq-analyst.sh",
+    "us-nasdaq-earnings-forward.sh",
     "us-universe-incremental.sh",
 ]
 ROOT_ONLY = pytest.mark.skipif(os.geteuid() == 0, reason="root는 권한 검사를 통과한다")
