@@ -6,13 +6,19 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 import pytest
+import requests
 
+from collector.kr.adapters.krx_common.client import (
+    KrxMdcAuthenticationError,
+    KrxMdcResponseError,
+)
 from collector.kr.domain.models import KrxSessionRow, StoredOhlc
 from collector.kr.service.fix_regular_session import fix_regular_session
 from collector.kr.service.regular_session_sources import (
     MDC_BLD,
     OPENAPI_SOURCE_NAME,
     REJECT_INCONSISTENT,
+    REJECT_MDC_ERROR,
     REJECT_NONPOSITIVE,
     REJECT_TOO_EARLY,
     CombinedSource,
@@ -195,3 +201,42 @@ def test_flagged_mdc_rows_show_up_as_skipped_and_source_rejected() -> None:
     )
     assert report.skipped_by_reason() == {"krx_invalid": 1}
     assert run.counts["source_rejected"] == {REJECT_INCONSISTENT: 1}
+
+
+class RaisingClient:
+    def __init__(self, exc: Exception) -> None:
+        self.exc = exc
+
+    def post_rows(self, bld: str, params: dict[str, Any], *, output_key: str) -> list[Any]:
+        raise self.exc
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        KrxMdcAuthenticationError("login failed"),
+        KrxMdcResponseError("bad payload"),
+        requests.ConnectionError("down"),
+        requests.Timeout("slow"),
+        TimeoutError("slow"),
+    ],
+)
+def test_combined_absorbs_mdc_failures_and_records_mdc_error(exc: Exception) -> None:
+    storage = FakeStorage([_stored(Y), _stored(T)], [_cap_row(Y)])
+    now = _at(T, 21, 0)
+    combined = CombinedSource(storage, _src(RaisingClient(exc), now), now_fn=lambda: now)
+    report, run = fix_regular_session(storage, Y, T, source=combined, allow_before_cutoff=True)
+    assert report.applied == 1  # Y fixed from OpenAPI; T stays unfixed
+    assert report.skipped_by_reason() == {"no_krx_row": 1}
+    assert run.counts["source_rejected"] == {REJECT_MDC_ERROR: 1}
+    assert run.params["source_errors"][0].startswith(type(exc).__name__)
+    assert storage.ohlc[("005930", "KOSPI", T)].close == 1050
+
+
+def test_mdc_source_alone_fails_loudly() -> None:
+    src = _src(RaisingClient(KrxMdcAuthenticationError("login failed")), _at(T, 21, 0))
+    with pytest.raises(KrxMdcAuthenticationError):
+        src.get_session_rows(T, T)
+    storage = FakeStorage([_stored(T)], [])
+    with pytest.raises(KrxMdcAuthenticationError):
+        fix_regular_session(storage, T, T, source=src, allow_before_cutoff=True)

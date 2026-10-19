@@ -16,6 +16,9 @@ from collections.abc import Callable, Iterable
 from datetime import date, datetime, time, timedelta
 from typing import Any, Protocol
 
+import requests
+
+from collector.kr.adapters.krx_common.client import KrxMdcError
 from collector.kr.domain.models import KrxSessionRow
 from collector.kr.service.fix_regular_session import FixStorage, MarketCapSource
 from collector.kr.util.time import now_kst
@@ -34,6 +37,10 @@ MDC_SAME_DAY_NOT_BEFORE = time(20, 30)
 REJECT_NONPOSITIVE = "mdc_nonpositive_or_missing"
 REJECT_INCONSISTENT = "mdc_ohlc_inconsistent"
 REJECT_TOO_EARLY = "mdc_too_early"
+REJECT_MDC_ERROR = "mdc_error"
+#: Failures the combined source absorbs (OpenAPI-only for that run); ``mdc`` alone raises.
+MDC_ABSORBED_ERRORS = (KrxMdcError, requests.RequestException, TimeoutError, ConnectionError)
+MAX_ERROR_MESSAGE = 200
 
 
 class MdcTooEarlyError(RuntimeError):
@@ -177,9 +184,12 @@ class CombinedSource:
         self._mdc = mdc
         self._now_fn = now_fn
         self.rejected: list[tuple[str, str]] = []
+        #: ``ClassName: short message`` for each absorbed MDC failure (kept in run params).
+        self.errors: list[str] = []
 
     def get_session_rows(self, since: date, until: date) -> list[KrxSessionRow]:
         self.rejected = []
+        self.errors = []
         api_rows = [
             KrxSessionRow(
                 r.ticker,
@@ -207,6 +217,16 @@ class CombinedSource:
         except MdcTooEarlyError as exc:
             logger.warning("Combined source: %s; using OpenAPI rows only.", exc)
             self.rejected.append((f"{first}..{last}", REJECT_TOO_EARLY))
+            return api_rows
+        except MDC_ABSORBED_ERRORS as exc:
+            message = f"{type(exc).__name__}: {str(exc)[:MAX_ERROR_MESSAGE]}"
+            logger.warning(
+                "Combined source: MDC failed (%s); using OpenAPI rows only, "
+                "same-day rows stay unfixed until the next run.",
+                message,
+            )
+            self.rejected.append((f"{first}..{last}", REJECT_MDC_ERROR))
+            self.errors.append(message)
             return api_rows
         self.rejected.extend(self._mdc.rejected)
         # OpenAPI wins: an MDC row is added only where no valid OpenAPI row exists. An OpenAPI

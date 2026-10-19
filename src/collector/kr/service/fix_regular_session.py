@@ -341,6 +341,8 @@ def fix_regular_session(
             krx = source.get_session_rows(ctx_since, ctx_until)
             report = plan_fixes(stored, krx, effective_start, end)
             report.source_rejected = list(getattr(source, "rejected", []))
+            if getattr(source, "errors", None):
+                run.params["source_errors"] = list(source.errors)
             logger.info(
                 "Regular-session fix %s..%s: planned=%d unchanged=%d skipped=%s",
                 effective_start,
