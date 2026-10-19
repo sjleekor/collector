@@ -7,6 +7,7 @@ rounding noise on a day's open that the isolated-outlier rule has to absorb.
 
 from __future__ import annotations
 
+import math
 import uuid
 from dataclasses import replace
 from datetime import date, datetime, timedelta
@@ -135,9 +136,9 @@ def test_adjusted_history_scales_by_naver_open_over_krx_open() -> None:
     assert report.plans, "contaminated rows must be planned"
     for p, day_krx in zip(report.plans, krx, strict=True):
         assert p.factor == pytest.approx(0.25)
-        # ties round up: 1050 x 0.25 = 262.5 -> 263 (Python's round() would give 262)
-        assert p.new_close == int(day_krx.close * 0.25 + 0.5)
-        assert p.new_high == int(day_krx.high * 0.25 + 0.5)
+        # ties round down: 1050 x 0.25 = 262.5 -> 262
+        assert p.new_close == math.ceil(day_krx.close * 0.25 - 0.5)
+        assert p.new_high == math.ceil(day_krx.high * 0.25 - 0.5)
 
 
 def test_open_and_volume_are_never_written() -> None:
@@ -323,3 +324,11 @@ def test_resolve_window() -> None:
     with pytest.raises(ValueError):
         resolve_window(storage, None, None, None)
     assert resolve_window(FakeStorage([], []), None, None, 3) is None
+
+
+def test_exact_half_tie_rounds_down() -> None:
+    # f = 1/2: high 1051 -> 525.5 -> 525 (down), close 1049 -> 524.5 -> 524, low 1000 -> 500.
+    stored = [_stored(START, 500, 999, 999, 999)]
+    krx = [_krx(START, 1000, 1051, 1000, 1049)]
+    p = plan_fixes(stored, krx, START, START).plans[0]
+    assert (p.new_high, p.new_low, p.new_close) == (525, 500, 524)

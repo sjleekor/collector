@@ -11,6 +11,12 @@ volume (0%) still match. ``daily_market_cap.source_*`` carries KRX's regular-ses
 On 2025-01-02~2026-09-11 it reproduces the stored naver close in 98.3% of 1.09M rows
 (137k of them with ``f != 1``). Open and volume are never written.
 
+Rounding: exact ties (``krx_x * f`` ending in .5) go DOWN, ``ceil(x - 0.5)`` in exact
+Fraction arithmetic. Measured 2026-10-18 on 2025-01-01~2026-09-11: of 201 exact .5 ties of
+``krx_close * f`` naver chose the lower integer 167 times and the higher 25 (9 neither); on
+f != 1 rows (136,860) exact reproduction was close 86.71% half-down vs 86.61% half-up, high
+88.45% vs 88.37%, low 88.16% vs 88.06%. f = 1 rows match 99.99% either way.
+
 ``f`` comes from the open price, which is rounded on both sides, so a single day can be
 off. An isolated outlier (``f`` differs by more than ``OUTLIER_TOLERANCE`` from both the
 previous and the next valid ``f`` of the ticker) takes the previous day's ``f``. On the last
@@ -133,13 +139,13 @@ def _positive(*values: int | None) -> bool:
     return all(v is not None and v > 0 for v in values)
 
 
-def _round_half_up(numerator: int, denominator: int) -> int:
-    """``round(numerator / denominator)`` for positive ints, ties up, no float."""
-    return (2 * numerator + denominator) // (2 * denominator)
+def _round_half_down(numerator: int, denominator: int) -> int:
+    """``ceil(numerator / denominator - 1/2)`` for positive ints: ties go down, no float."""
+    return (2 * numerator + denominator - 1) // (2 * denominator)
 
 
 def _scale(value: int, f: Fraction) -> int:
-    return _round_half_up(value * f.numerator, f.denominator)
+    return _round_half_down(value * f.numerator, f.denominator)
 
 
 def _differs(a: Fraction, b: Fraction) -> bool:
