@@ -1515,6 +1515,7 @@ class KrxSessionRow:
     high: int | None
     low: int | None
     close: int | None
+    source: str | None = None  # where this row came from; None = the run's source
 
 
 @dataclass(frozen=True, slots=True)
@@ -1537,6 +1538,7 @@ class FixPlan:
     krx_close: int
     factor: float
     factor_basis: str  # own | prev_day
+    krx_source: str | None = None  # row-level source (audit); None = the run's source
 
     @property
     def key(self) -> tuple[str, str, date]:

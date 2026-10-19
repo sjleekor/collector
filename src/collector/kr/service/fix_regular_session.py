@@ -85,6 +85,8 @@ class FixReport:
     skipped: list[SkippedRow] = field(default_factory=list)
     applied: int = 0
     audit_rows_new: int = 0
+    #: rows the source itself dropped (sanity filter, too-early guard), as ``(key, reason)``.
+    source_rejected: list[tuple[str, str]] = field(default_factory=list)
 
     def skipped_by_reason(self) -> dict[str, int]:
         counts: dict[str, int] = defaultdict(int)
@@ -264,9 +266,17 @@ def plan_fixes(
                     krx_close=k.close,
                     factor=float(f),
                     factor_basis=basis,
+                    krx_source=k.source,
                 )
             )
     return report
+
+
+def _count_reasons(items: list[tuple[str, str]]) -> dict[str, int]:
+    counts: dict[str, int] = defaultdict(int)
+    for _key, reason in items:
+        counts[reason] += 1
+    return dict(counts)
 
 
 def resolve_window(
@@ -330,6 +340,7 @@ def fix_regular_session(
             stored = storage.get_stored_ohlc(ctx_since, ctx_until)
             krx = source.get_session_rows(ctx_since, ctx_until)
             report = plan_fixes(stored, krx, effective_start, end)
+            report.source_rejected = list(getattr(source, "rejected", []))
             logger.info(
                 "Regular-session fix %s..%s: planned=%d unchanged=%d skipped=%s",
                 effective_start,
@@ -369,6 +380,7 @@ def fix_regular_session(
             "unchanged": report.unchanged,
             "audit_rows_new": report.audit_rows_new,
             "skipped": report.skipped_by_reason(),
+            "source_rejected": _count_reasons(report.source_rejected),
         }
         if not dry_run:
             storage.record_run(run)

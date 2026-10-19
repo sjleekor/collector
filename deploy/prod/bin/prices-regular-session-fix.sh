@@ -13,6 +13,10 @@ set -euo pipefail
 # 환경:
 #   REGULAR_FIX_LAST_TRADING_DAYS  덮을 최근 거래일 수 (기본 10)
 #   REGULAR_FIX_DRY_RUN=1          계획만 출력하고 쓰지 않는다
+#   REGULAR_FIX_SOURCE             market-cap | mdc | combined (기본 combined)
+#                                  combined: 시총(OpenAPI) 우선, 아직 안 온 당일만 KRX MDC.
+#                                  당일 MDC는 20:30 KST 전이면 거절되어 시총만 쓴다.
+#   REGULAR_FIX_ALLOW_EARLY_MDC=1  20:30 전 당일 MDC를 허용한다 (권하지 않는다)
 # 인자는 그대로 `prices fix-regular-session`에 전달된다 (예: --start/--end).
 # Cronicle 등록은 별도다(이 wrapper는 등록하지 않는다).
 
@@ -27,11 +31,17 @@ else
   args+=("$@")
 fi
 
+args+=(--source "${REGULAR_FIX_SOURCE:-combined}")
+
+if [[ "${REGULAR_FIX_ALLOW_EARLY_MDC:-0}" == "1" ]]; then
+  args+=(--allow-early-mdc)
+fi
+
 if [[ "${REGULAR_FIX_DRY_RUN:-0}" == "1" ]]; then
   args+=(--dry-run)
 fi
 
-# DB만 읽고 쓰며 외부 원천을 부르지 않는다. 그래도 18:30 naver 수집·20:00 시총과 같은
+# market-cap 원천이면 DB만 읽고 쓴다(combined·mdc는 당일 한 번 KRX MDC를 부른다). 18:30 naver 수집·20:00 시총과 같은
 # krx_marketdata 락을 쓴다 — 그 작업이 도는 동안 기다려(기본 900초) 서로 덮어쓰지 않게 하고,
 # 도메인 기본 간격(60초)이 앞 작업과의 사이를 벌린다. 락을 못 얻으면 75로 끝난다.
 sdc_run_daily_collector krx_marketdata "${args[@]}"

@@ -61,3 +61,14 @@ def test_explicit_args_replace_the_default_window(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
     line = capture.read_text().splitlines()[-1]
     assert "--start 2026-09-14 --end 2026-09-18" in line and "--last-trading-days" not in line
+
+
+def test_source_defaults_to_combined_and_is_overridable(tmp_path: Path) -> None:
+    _, capture = _run(tmp_path)
+    assert "--source combined" in capture.read_text()
+    (tmp_path / "args.txt").unlink()
+    _, capture = _run(
+        tmp_path, extra_env={"REGULAR_FIX_SOURCE": "market-cap", "REGULAR_FIX_ALLOW_EARLY_MDC": "1"}
+    )
+    line = capture.read_text().splitlines()[-1]
+    assert "--source market-cap" in line and "--allow-early-mdc" in line

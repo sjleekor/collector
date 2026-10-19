@@ -4595,7 +4595,7 @@ class PostgresStorage:
                         p.krx_close,
                         p.factor,
                         p.factor_basis,
-                        krx_source,
+                        p.krx_source or krx_source,
                     )
                     for key in updated
                     for p in (by_key[key],)
