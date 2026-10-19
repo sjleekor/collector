@@ -42,7 +42,9 @@ from collector.kr.domain.models import (
     DartShareholderReturnLine,
     DartXbrlDocument,
     DartXbrlFactLine,
+    FixPlan,
     IngestionRun,
+    KrxSessionRow,
     MarketCapPoint,
     MetricCatalogEntry,
     MetricMappingRule,
@@ -54,6 +56,7 @@ from collector.kr.domain.models import (
     StockMetricFact,
     StockStatusRecord,
     StockUniverseSnapshot,
+    StoredOhlc,
     UpsertResult,
 )
 from collector.kr.infra.calendar.trading_days import get_trading_days
@@ -4460,6 +4463,158 @@ class PostgresStorage:
                 )
                 rows = cur.fetchall()
         return [OhlcvPoint(*row) for row in rows]
+
+    # -- regular-session fix (service/fix_regular_session.py) -----------------------
+
+    def get_stored_ohlc(self, since: date, until: date) -> list[StoredOhlc]:
+        """Return ``daily_ohlcv`` rows in ``[since, until]`` (read-only)."""
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT ticker, market, trade_date, open, high, low, close
+                    FROM daily_ohlcv
+                    WHERE trade_date BETWEEN %s AND %s
+                    """,
+                    (since, until),
+                )
+                rows = cur.fetchall()
+        return [StoredOhlc(*row) for row in rows]
+
+    def get_market_cap_session_rows(self, since: date, until: date) -> list[KrxSessionRow]:
+        """Return KRX regular-session raw OHLC from ``daily_market_cap`` (NULL/0 kept as is)."""
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT ticker, market, trade_date,
+                           source_open, source_high, source_low, source_close
+                    FROM daily_market_cap
+                    WHERE trade_date BETWEEN %s AND %s
+                    """,
+                    (since, until),
+                )
+                rows = cur.fetchall()
+        return [KrxSessionRow(*row) for row in rows]
+
+    def get_latest_ohlcv_trade_dates(self, limit: int) -> list[date]:
+        """Return the ``limit`` most recent distinct ``daily_ohlcv`` trade dates, newest first."""
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT DISTINCT trade_date FROM daily_ohlcv
+                    ORDER BY trade_date DESC
+                    LIMIT %s
+                    """,
+                    (limit,),
+                )
+                rows = cur.fetchall()
+        return [r[0] for r in rows]
+
+    def apply_regular_session_fixes(
+        self,
+        plans: list[FixPlan],
+        run_id: Any,
+        applied_at: Any,
+        krx_source: str,
+    ) -> tuple[list[tuple[str, str, date]], int]:
+        """Write high/low/close and their audit rows in one transaction.
+
+        The UPDATE only matches a row that still holds the old values the plan was made
+        from, so a naver re-fetch that landed in between is left for the next run instead
+        of being overwritten with a stale plan. ``fetched_at`` is bumped so the remote-sync
+        cursor (``ix_daily_ohlcv_sync_cursor``) picks the change up. Returns the keys that
+        were updated and how many audit rows were new (an identical old -> new that was
+        already logged is not logged twice).
+        """
+        if not plans:
+            return [], 0
+        by_key = {p.key: p for p in plans}
+        updated: list[tuple[str, str, date]] = []
+        audit_new = 0
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                for offset in range(0, len(plans), 1000):
+                    page = plans[offset : offset + 1000]
+                    # unnest(arrays) instead of VALUES: RETURNING rows are needed, and the
+                    # execute_values call-site rule (test_common_features_storage) allows one.
+                    cur.execute(
+                        """
+                        UPDATE daily_ohlcv AS o
+                        SET high = v.new_high, low = v.new_low, close = v.new_close,
+                            fetched_at = %s
+                        FROM unnest(
+                            %s::date[], %s::text[], %s::text[],
+                            %s::bigint[], %s::bigint[], %s::bigint[],
+                            %s::bigint[], %s::bigint[], %s::bigint[]
+                        ) AS v(
+                            trade_date, ticker, market,
+                            old_high, old_low, old_close,
+                            new_high, new_low, new_close
+                        )
+                        WHERE o.trade_date = v.trade_date
+                          AND o.ticker = v.ticker
+                          AND o.market = v.market
+                          AND o.high = v.old_high
+                          AND o.low = v.old_low
+                          AND o.close = v.old_close
+                        RETURNING o.ticker, o.market, o.trade_date
+                        """,
+                        (
+                            applied_at,
+                            [p.trade_date for p in page],
+                            [p.ticker for p in page],
+                            [p.market for p in page],
+                            [p.old_high for p in page],
+                            [p.old_low for p in page],
+                            [p.old_close for p in page],
+                            [p.new_high for p in page],
+                            [p.new_low for p in page],
+                            [p.new_close for p in page],
+                        ),
+                    )
+                    updated.extend((r[0], r[1], r[2]) for r in cur.fetchall())
+                audit_args = [
+                    (
+                        run_id,
+                        applied_at,
+                        p.trade_date,
+                        p.ticker,
+                        p.market,
+                        p.old_high,
+                        p.old_low,
+                        p.old_close,
+                        p.new_high,
+                        p.new_low,
+                        p.new_close,
+                        p.naver_open,
+                        p.krx_open,
+                        p.krx_high,
+                        p.krx_low,
+                        p.krx_close,
+                        p.factor,
+                        p.factor_basis,
+                        krx_source,
+                    )
+                    for key in updated
+                    for p in (by_key[key],)
+                ]
+                audit_new = _execute_values_counted(
+                    cur,
+                    """
+                    INSERT INTO daily_ohlcv_regular_fix_audit (
+                        run_id, applied_at, trade_date, ticker, market,
+                        old_high, old_low, old_close, new_high, new_low, new_close,
+                        naver_open, krx_open, krx_high, krx_low, krx_close,
+                        factor, factor_basis, krx_source
+                    )
+                    VALUES %s
+                    ON CONFLICT DO NOTHING
+                    """,
+                    audit_args,
+                )
+        return updated, audit_new
 
     def get_latest_market_cap_date(self) -> date | None:
         """Return the latest stored ``daily_market_cap`` trade_date."""

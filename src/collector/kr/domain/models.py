@@ -1489,3 +1489,55 @@ class CollectionSliceState:
         if self.status is SliceStatus.SUCCESS:
             return self.expected_rows is None or self.expected_rows == self.actual_rows
         return self.status is SliceStatus.NO_DATA
+
+
+@dataclass(frozen=True, slots=True)
+class StoredOhlc:
+    """A ``daily_ohlcv`` row (the columns this job reads)."""
+
+    ticker: str
+    market: str
+    trade_date: date
+    open: int
+    high: int
+    low: int
+    close: int
+
+
+@dataclass(frozen=True, slots=True)
+class KrxSessionRow:
+    """KRX regular-session raw (unadjusted) OHLC. Values may be ``None``/0 when missing."""
+
+    ticker: str
+    market: str
+    trade_date: date
+    open: int | None
+    high: int | None
+    low: int | None
+    close: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class FixPlan:
+    """One row's correction: old -> new with the evidence."""
+
+    ticker: str
+    market: str
+    trade_date: date
+    old_high: int
+    old_low: int
+    old_close: int
+    new_high: int
+    new_low: int
+    new_close: int
+    naver_open: int
+    krx_open: int
+    krx_high: int
+    krx_low: int
+    krx_close: int
+    factor: float
+    factor_basis: str  # own | prev_day
+
+    @property
+    def key(self) -> tuple[str, str, date]:
+        return (self.ticker, self.market, self.trade_date)
