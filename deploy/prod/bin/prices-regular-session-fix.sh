@@ -8,7 +8,8 @@ set -euo pipefail
 # `prices-market-cap-backfill.sh`가 채운다(하루 늦게 온다: T일 20:00에는 T-1일까지).
 # 그래서 이 wrapper는 **20:00 시총 작업이 끝난 뒤**에 돌리고, 최근 N 거래일(기본 10)을
 # 매번 다시 맞춘다. 이미 맞은 행은 건드리지 않아 여러 번 돌려도 같다.
-# T일 행은 T+1일 20:00 이후에야 고쳐진다(그때까지 naver 값이 남는다).
+# 기본 combined에서는 T일 행도 20:30 KST 뒤 KRX MDC 당일 값으로 그날 고쳐진다(10-20 대조: 10-19
+# MDC 20:36 값이 OpenAPI 확정값과 2,761행 모두 같음). market-cap만 쓰면 T+1일 20:00 뒤에 고쳐진다.
 #
 # 환경:
 #   REGULAR_FIX_LAST_TRADING_DAYS  덮을 최근 거래일 수 (기본 10)
