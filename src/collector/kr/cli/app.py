@@ -824,11 +824,13 @@ def _dart_xbrl_actual_attempt_estimate(
     reprt_codes = sorted({reprt_code for _, reprt_code in allowed_pairs})
     corp_rows = storage.get_dart_corp_master(active_only=True, tickers=tickers)
     corp_by_ticker = {corp.ticker: corp for corp in corp_rows if corp.ticker}
-    financial_rows = storage.get_dart_financial_statement_raw(bsns_years, reprt_codes, tickers)
+    receipt_keys = storage.get_dart_financial_statement_receipt_keys(
+        bsns_years, reprt_codes, tickers
+    )
     request_targets: set[tuple[str, int, str, str]] = set()
-    for row in financial_rows:
-        if row.ticker and row.rcept_no and (row.bsns_year, row.reprt_code) in allowed_pairs:
-            request_targets.add((row.ticker, row.bsns_year, row.reprt_code, row.rcept_no))
+    for ticker, bsns_year, reprt_code, rcept_no in receipt_keys:
+        if ticker and rcept_no and (bsns_year, reprt_code) in allowed_pairs:
+            request_targets.add((ticker, bsns_year, reprt_code, rcept_no))
 
     if force:
         existing_doc_keys: set[tuple[str, int, str, str]] = set()

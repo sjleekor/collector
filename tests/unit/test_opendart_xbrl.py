@@ -293,6 +293,15 @@ class MockXbrlStorage(FakeSliceStorageMixin):
             )
         ]
 
+    def get_dart_financial_statement_receipt_keys(
+        self,
+        bsns_years: list[int],
+        reprt_codes: list[str],
+        tickers: list[str] | None = None,
+    ) -> list[tuple[str | None, int, str, str | None]]:
+        rows = self.get_dart_financial_statement_raw(bsns_years, reprt_codes, tickers)
+        return list(dict.fromkeys((r.ticker, r.bsns_year, r.reprt_code, r.rcept_no) for r in rows))
+
     def upsert_dart_xbrl_documents(self, records: list[DartXbrlDocument]) -> UpsertResult:
         self.documents.extend(records)
         return UpsertResult(updated=len(records))

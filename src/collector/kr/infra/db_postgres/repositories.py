@@ -2445,6 +2445,45 @@ class PostgresStorage:
                     )
         return records
 
+    def get_dart_financial_statement_receipt_keys(
+        self,
+        bsns_years: list[int],
+        reprt_codes: list[str],
+        tickers: list[str] | None = None,
+    ) -> list[tuple[str | None, int, str, str | None]]:
+        """Return distinct ``(ticker, bsns_year, reprt_code, rcept_no)`` keys.
+
+        Light-weight counterpart of ``get_dart_financial_statement_raw`` for callers
+        that only need the receipt keys (XBRL planning). The same WHERE filters apply,
+        but ``raw_payload`` and the other columns are never transferred. Rows come back
+        in the order in which each key first appears in the full query
+        (``ticker, bsns_year, reprt_code, fs_div, sj_div, ord``). Empty ``ticker`` /
+        ``rcept_no`` are not filtered here, matching the full query.
+        """
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                sql = """
+                    SELECT ticker, bsns_year, reprt_code, rcept_no
+                    FROM (
+                        SELECT DISTINCT ON (ticker, bsns_year, reprt_code, rcept_no)
+                               ticker, bsns_year, reprt_code, rcept_no, fs_div, sj_div, ord
+                        FROM dart_financial_statement_raw
+                        WHERE bsns_year = ANY(%s)
+                          AND reprt_code = ANY(%s)
+                """
+                params: list[object] = [bsns_years, reprt_codes]
+                if tickers:
+                    sql += " AND ticker = ANY(%s)"
+                    params.append(tickers)
+                sql += """
+                        ORDER BY ticker, bsns_year, reprt_code, rcept_no,
+                                 fs_div, sj_div, ord
+                    ) AS keys
+                    ORDER BY ticker, bsns_year, reprt_code, fs_div, sj_div, ord
+                """
+                cur.execute(sql, params)
+                return [(r[0], r[1], r[2], r[3]) for r in cur.fetchall()]
+
     def get_dart_share_count_raw(
         self,
         bsns_years: list[int],

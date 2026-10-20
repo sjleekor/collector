@@ -451,6 +451,15 @@ class Storage(Protocol):
         """Return financial statement raw rows for normalization."""
         ...
 
+    def get_dart_financial_statement_receipt_keys(
+        self,
+        bsns_years: list[int],
+        reprt_codes: list[str],
+        tickers: list[str] | None = None,
+    ) -> list[tuple[str | None, int, str, str | None]]:
+        """Return distinct (ticker, bsns_year, reprt_code, rcept_no) keys without payloads."""
+        ...
+
     def iter_dart_financial_statement_for_normalize(
         self,
         bsns_years: list[int],
