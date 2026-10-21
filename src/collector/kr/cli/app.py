@@ -479,6 +479,26 @@ def _exit_if_run_aborted(errors: Mapping[str, str], label: str) -> None:
             sys.exit(1)
 
 
+def _exit_if_every_request_failed(
+    requests_attempted: int, errors: Mapping[str, str], label: str
+) -> None:
+    """Turn a run whose every attempted request failed into a non-zero exit code.
+
+    KRX flow sync on 2026-07-27..29 sent 45, 50 and 55 requests, every one
+    failed, nothing was stored -- and it exited 0, so Cronicle filed three days
+    of nothing as successes. It has no consecutive-failure guard, so this never
+    shows up as an aborted run. A run that only partly failed stays a partial
+    success (exit 0), like per-item errors everywhere else.
+    """
+    request_errors = sum(1 for key in errors if key not in ABORTED_RUN_ERROR_KEYS)
+    if requests_attempted > 0 and request_errors >= requests_attempted:
+        print(
+            f"❌ {label} failed: all {requests_attempted} attempted requests errored.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
 def _handle_ops_freshness_report(args: argparse.Namespace) -> None:
     """Handle ``collector ops freshness-report``."""
     settings = get_settings()
@@ -2188,6 +2208,8 @@ def _handle_flows_sync(args: argparse.Namespace) -> None:
     if result.errors:
         for request_key, error in list(result.errors.items())[:10]:
             print(f"   - Error {request_key}: {error}")
+    _exit_if_run_aborted(result.errors, "KRX flow sync")
+    _exit_if_every_request_failed(result.requests_attempted, result.errors, "KRX flow sync")
 
 
 def _handle_flows_sync_kis(args: argparse.Namespace) -> None:
