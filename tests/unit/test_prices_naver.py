@@ -176,6 +176,41 @@ def test_one_malformed_bar_does_not_cost_the_other_bars() -> None:
     ]
 
 
+def test_items_that_all_fail_to_parse_are_an_error_not_an_empty_range() -> None:
+    # Items are present but none parses: a format change, not "no data".
+    changed = (
+        b'<?xml version="1.0" encoding="EUC-KR" ?>\n<protocol><chartdata symbol="005930">'
+        b'<item data="2026-08-11,229500,243000" />'
+        b'<item data="nope" />'
+        b"<item />"
+        b"</chartdata></protocol>"
+    )
+    result = _fetch(_provider(_FakeResponse(changed)), date(2026, 8, 11), date(2026, 8, 18))
+
+    assert result.bars == []
+    assert result.error is not None
+    assert "005930" in result.error
+    assert "3" in result.error
+    assert "none parsed" in result.error
+
+
+def test_zero_items_inside_chartdata_is_still_not_an_error() -> None:
+    empty = b'<?xml version="1.0" encoding="EUC-KR" ?>\n<protocol><chartdata symbol="005930" />'
+    empty += b"</protocol>"
+    result = _fetch(_provider(_FakeResponse(empty)), date(2026, 8, 11), date(2026, 8, 18))
+
+    assert result.error is None
+    assert result.bars == []
+
+
+def test_parsed_items_outside_the_range_are_not_an_error() -> None:
+    # Items parsed fine; the range filter just leaves nothing. Not a format change.
+    result = _fetch(_provider(_FakeResponse(LIVE_XML)), date(2020, 1, 1), date(2020, 1, 31))
+
+    assert result.error is None
+    assert result.bars == []
+
+
 def test_an_inverted_range_is_refused_without_a_request() -> None:
     provider = _provider(_FakeResponse(LIVE_XML))
 

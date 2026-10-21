@@ -168,7 +168,9 @@ class NaverDailyPriceProvider:
         fetched_at = now_kst()
         bars: list[DailyBar] = []
         skipped = 0
+        seen = 0
         for node in root.iter("item"):
+            seen += 1
             parsed = _parse_item(node.get("data", ""))
             if parsed is None:
                 skipped += 1
@@ -189,6 +191,19 @@ class NaverDailyPriceProvider:
                     source=Source.NAVER,
                     fetched_at=fetched_at,
                 )
+            )
+
+        if seen and skipped == seen:
+            # Items were there but not one was readable. That is the shape of an
+            # upstream format change, not of "this ticker has no bars" (which is
+            # zero items), and returning bars=[] would write a gap that
+            # gap-detection then reads as genuinely absent data.
+            return DailyPriceResult(
+                ticker=ticker,
+                error=(
+                    f"unparseable response for {ticker}: {seen} items seen, "
+                    "none parsed (Naver item format may have changed)"
+                ),
             )
 
         if skipped:
