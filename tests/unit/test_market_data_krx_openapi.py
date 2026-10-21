@@ -113,6 +113,76 @@ def test_the_auth_key_goes_in_a_header_and_the_date_in_the_query() -> None:
     assert key == "key-a"
 
 
+def _html_200(text: str = "<html><body>점검 중입니다</body></html>") -> _FakeResponse:
+    response = _FakeResponse(200, ValueError("not json"))
+    response.text = text
+    return response
+
+
+def _client_with_sleeps(
+    responses: list[_FakeResponse], sleeps: list[float], keys: tuple[str, ...] = ("key-a",)
+) -> KrxOpenApiClient:
+    return KrxOpenApiClient(
+        keys,
+        session=_FakeSession(responses),
+        requests_per_second=0,
+        sleep_fn=sleeps.append,
+        max_attempts=3,
+    )
+
+
+def test_a_200_that_is_not_json_is_retried_then_fails_as_runtime_error() -> None:
+    # HTTP 200 is not success: a maintenance page used to escape as a bare
+    # ValueError with no retry and no client classification.
+    sleeps: list[float] = []
+    client = _client_with_sleeps([_html_200() for _ in range(3)], sleeps, keys=("key-a", "key-b"))
+
+    with pytest.raises(RuntimeError, match="not JSON") as excinfo:
+        client.fetch_rows("sto", "stk_bydd_trd", {"basDd": "20260814"})
+
+    message = str(excinfo.value)
+    assert "sto/stk_bydd_trd" in message
+    assert "점검 중" in message  # short body snippet
+    assert "key-a" not in message and "key-b" not in message
+    assert client.counters.http_requests == 3
+    assert client.counters.http_retries == 2
+    assert client.counters.http_errors == 3
+    assert client.counters.key_rotations == 0
+    assert sleeps == [2.0, 4.0]
+    assert [call[2] for call in client._session.calls] == ["key-a"] * 3  # type: ignore[attr-defined]
+
+
+def test_a_200_that_is_not_json_once_then_valid_json_returns_rows() -> None:
+    sleeps: list[float] = []
+    client = _client_with_sleeps([_html_200(), _ok([KOSPI_ROW])], sleeps)
+
+    rows = client.fetch_rows("sto", "stk_bydd_trd", {"basDd": "20260814"})
+
+    assert rows == [KOSPI_ROW]
+    assert client.counters.http_requests == 2
+    assert client.counters.http_retries == 1
+    assert sleeps == [2.0]
+
+
+def test_a_200_json_array_body_is_retried_like_non_json() -> None:
+    client = _client_with_sleeps([_FakeResponse(200, ["x"]) for _ in range(3)], [])
+
+    with pytest.raises(RuntimeError, match="not a JSON object"):
+        client.fetch_rows("sto", "stk_bydd_trd", {})
+
+    assert client.counters.http_requests == 3
+
+
+def test_valid_json_is_unchanged() -> None:
+    client = _client_with_sleeps([_ok([KOSPI_ROW])], [])
+    assert client.fetch_rows("sto", "stk_bydd_trd", {}) == [KOSPI_ROW]
+    assert client.counters.http_retries == 0
+
+    empty = _client_with_sleeps([_FakeResponse(200, {"OutBlock_1": []})], [])
+    assert empty.fetch_rows("sto", "stk_bydd_trd", {}) == []
+    assert empty.counters.http_retries == 0
+
+
 def test_an_unapproved_endpoint_is_not_reported_as_an_auth_failure() -> None:
     # Measured 2026-08-18: a valid key on an endpoint with no 이용 신청 returns
     # 401 "Unauthorized API Call", while a bad key returns "Unauthorized Key".
