@@ -11,6 +11,7 @@ from collector.kr.domain.models import (
     CommonFeatureSyncResult,
     UpsertResult,
 )
+from collector.kr.infra.config.settings import get_settings
 
 
 def test_dart_main_prefixes_dart_subcommand(monkeypatch) -> None:
@@ -458,7 +459,20 @@ def test_run_child_with_env_var_signal_death_returns_128_plus_signum() -> None:
     assert exit_code == 143
 
 
-def test_handle_db_with_remote_dsn_missing_command_exits_2() -> None:
+@pytest.fixture
+def remote_db_info_env(monkeypatch, tmp_path):
+    """Pin REMOTE_DB_INFO_PATH so the handler never depends on the developer's .env.
+
+    Process env vars outrank .env in Settings; get_settings is lru_cached, so it is
+    cleared before and after to keep a cached .env-derived value out and this one in.
+    """
+    monkeypatch.setenv("REMOTE_DB_INFO_PATH", str(tmp_path / "remote_db_info.json"))
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+def test_handle_db_with_remote_dsn_missing_command_exits_2(remote_db_info_env) -> None:
     args = app.build_parser().parse_args(["db", "with-remote-dsn"])
 
     with pytest.raises(SystemExit) as exc:
@@ -467,7 +481,9 @@ def test_handle_db_with_remote_dsn_missing_command_exits_2() -> None:
     assert exc.value.code == 2
 
 
-def test_handle_db_with_remote_dsn_injects_dsn_into_child_only(monkeypatch) -> None:
+def test_handle_db_with_remote_dsn_injects_dsn_into_child_only(
+    monkeypatch, remote_db_info_env
+) -> None:
     calls: dict[str, object] = {}
 
     @contextlib.contextmanager
@@ -512,7 +528,9 @@ def test_handle_db_with_remote_dsn_injects_dsn_into_child_only(monkeypatch) -> N
     assert calls["resolve_kwargs"]["ssh_local_port"] == 6543
 
 
-def test_handle_db_with_remote_dsn_propagates_child_exit_code(monkeypatch) -> None:
+def test_handle_db_with_remote_dsn_propagates_child_exit_code(
+    monkeypatch, remote_db_info_env
+) -> None:
     @contextlib.contextmanager
     def fake_resolve_remote_dsn(**kwargs):
         yield SimpleNamespace(host="sj2-server"), "postgresql://fake-dsn"
