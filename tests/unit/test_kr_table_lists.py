@@ -49,6 +49,16 @@ DDL_ONLY_EXCLUSIONS: dict[str, str] = {
     ),
 }
 
+# DDL tables that are exported to raw parquet but intentionally NOT mirrored by remote_sync.
+# remote_sync has been a dev-only path since 2026-09-30, so a new table may reasonably be
+# exported without being synced. Such a table must be in export_tables.toml and the shell
+# arrays, must not be in SYNC_TABLE_SPECS, and must not also be in DDL_ONLY_EXCLUSIONS.
+# Empty on purpose. First candidate: kis_stock_status_daily, once branch
+# kr-4-2b-export-registration merges (it adds the table to export but not to sync).
+# Pending a user decision recorded in
+# my/milestones/common/20261020_collector_refactoring/README.md section 6.
+NOT_SYNCED_EXCLUSIONS: dict[str, str] = {}
+
 # Names in the sync specs / raw export that are no longer DDL tables.
 DROPPED_TABLE_EXCLUSIONS: dict[str, str] = {
     name: (
@@ -107,6 +117,7 @@ def find_table_list_problems(
     raw_sh: set[str],
     ddl_only: dict[str, str],
     dropped: dict[str, str],
+    not_synced: dict[str, str],
 ) -> list[str]:
     """Return human-readable problems; empty list means the lists agree."""
     problems: list[str] = []
@@ -126,10 +137,11 @@ def find_table_list_problems(
 
     # A. every DDL table is mirrored and exported unless excluded
     for t in sorted(ddl - set(ddl_only)):
-        if t not in sync:
+        if t not in sync and t not in not_synced:
             problems.append(
                 f"{t}: DDL에는 있는데 remote_sync SYNC_TABLE_SPECS에 없음. "
-                "spec을 추가하거나 DDL_ONLY_EXCLUSIONS에 이유와 함께 넣으십시오"
+                "spec을 추가하거나 export만 하는 표면 NOT_SYNCED_EXCLUSIONS, "
+                "둘 다 안 하는 표면 DDL_ONLY_EXCLUSIONS에 이유와 함께 넣으십시오"
             )
         if t not in raw_toml:
             problems.append(
@@ -165,6 +177,28 @@ def find_table_list_problems(
             problems.append(
                 f"{t}: DDL_ONLY_EXCLUSIONS에 있는데 이미 sync spec 또는 export에 등록됨. "
                 "DDL_ONLY_EXCLUSIONS에서 지우십시오"
+            )
+    for t in sorted(not_synced):
+        if t not in ddl:
+            problems.append(
+                f"{t}: NOT_SYNCED_EXCLUSIONS에 있는데 DDL에 표가 없음. "
+                "NOT_SYNCED_EXCLUSIONS에서 지우십시오"
+            )
+        if t in sync:
+            problems.append(
+                f"{t}: NOT_SYNCED_EXCLUSIONS에 있는데 이미 remote_sync SYNC_TABLE_SPECS에 있음. "
+                "NOT_SYNCED_EXCLUSIONS에서 지우십시오"
+            )
+        if t not in raw_toml or t not in raw_sh:
+            problems.append(
+                f"{t}: NOT_SYNCED_EXCLUSIONS에 있는데 export_tables.toml 또는 "
+                "raw-parquet-export-all.sh 배열에 없음(export는 되어야 함). "
+                "두 곳에 추가하거나 NOT_SYNCED_EXCLUSIONS에서 지우십시오"
+            )
+        if t in ddl_only:
+            problems.append(
+                f"{t}: NOT_SYNCED_EXCLUSIONS와 DDL_ONLY_EXCLUSIONS에 모두 있음. "
+                "표는 한 분류에만 둘 수 있으니 둘 중 한 곳에서 지우십시오"
             )
     for t in sorted(dropped):
         if t in ddl:
@@ -208,17 +242,28 @@ def sets() -> dict[str, set[str]]:
 
 def test_table_lists_agree(sets: dict[str, set[str]]) -> None:
     problems = find_table_list_problems(
-        **sets, ddl_only=DDL_ONLY_EXCLUSIONS, dropped=DROPPED_TABLE_EXCLUSIONS
+        **sets,
+        ddl_only=DDL_ONLY_EXCLUSIONS,
+        dropped=DROPPED_TABLE_EXCLUSIONS,
+        not_synced=NOT_SYNCED_EXCLUSIONS,
     )
     assert not problems, "KR 표 목록 불일치:\n  " + "\n  ".join(problems)
 
 
 def test_parsers_see_expected_shapes(sets: dict[str, set[str]]) -> None:
-    # Guards the parsers themselves (e.g. commented-out CREATE TABLE must not count).
-    assert len(sets["ddl"]) == 26
+    # Only catches parser malfunction; adding a table legitimately must not break this.
+    raw_ddl = DDL_PATH.read_text(encoding="utf-8")
+    no_block_comments = re.sub(r"/\*.*?\*/", "", raw_ddl, flags=re.DOTALL)
+    independent_count = sum(
+        1
+        for line in no_block_comments.splitlines()
+        if re.match(r"^\s*CREATE\s+TABLE", line, re.IGNORECASE)
+    )
+    assert len(sets["ddl"]) == independent_count
     assert "intraday_ohlcv" not in sets["ddl"]
-    assert len(sets["raw_toml"]) == 20
-    assert len(sets["raw_sh"]) == 20
+    assert len(sets["ddl"]) >= 20
+    assert len(sets["raw_toml"]) >= 15
+    assert len(sets["raw_sh"]) >= 15
 
 
 def test_raw_shell_all_tables_uses_the_three_arrays() -> None:
@@ -230,6 +275,7 @@ def test_raw_shell_all_tables_uses_the_three_arrays() -> None:
 def test_canonical_toml_matches_canonical_shell() -> None:
     toml_names = parse_toml_tables(CANON_TOML_PATH.read_text(encoding="utf-8"))
     sh_names = parse_shell_array(CANON_SH_PATH.read_text(encoding="utf-8"), "tables")
+    assert toml_names and sh_names, "canonical 표 목록이 비어 있음(파서 오작동 의심)"
     assert len(toml_names) == len(set(toml_names)) and len(sh_names) == len(set(sh_names))
     assert set(toml_names) == set(sh_names), (
         f"export_canonical_tables.toml에만 있음: {sorted(set(toml_names) - set(sh_names))}, "
@@ -247,7 +293,10 @@ def _mutated(sets: dict[str, set[str]], **changes: set[str]) -> dict[str, set[st
 
 def _problems(s: dict[str, set[str]]) -> list[str]:
     return find_table_list_problems(
-        **s, ddl_only=DDL_ONLY_EXCLUSIONS, dropped=DROPPED_TABLE_EXCLUSIONS
+        **s,
+        ddl_only=DDL_ONLY_EXCLUSIONS,
+        dropped=DROPPED_TABLE_EXCLUSIONS,
+        not_synced=NOT_SYNCED_EXCLUSIONS,
     )
 
 
@@ -293,3 +342,64 @@ def test_parse_ddl_ignores_comments() -> None:
         "CREATE TABLE d (\n"
     )
     assert parse_ddl_tables(sql) == {"c", "d"}
+
+
+# ---------------------------------------------------------------- NOT_SYNCED tests
+
+
+def _with_not_synced(
+    sets: dict[str, set[str]],
+    not_synced: dict[str, str],
+    ddl_only: dict[str, str] | None = None,
+) -> list[str]:
+    return find_table_list_problems(
+        **sets,
+        ddl_only=DDL_ONLY_EXCLUSIONS if ddl_only is None else ddl_only,
+        dropped=DROPPED_TABLE_EXCLUSIONS,
+        not_synced=not_synced,
+    )
+
+
+def test_not_synced_allows_exported_but_unsynced_table(sets: dict[str, set[str]]) -> None:
+    # Simulates branch kr-4-2b-export-registration: export registered, sync not.
+    t = "kis_stock_status_daily"
+    assert t in sets["ddl"] and t not in sets["sync"]
+    s = _mutated(sets, raw_toml=sets["raw_toml"] | {t}, raw_sh=sets["raw_sh"] | {t})
+    ddl_only = {k: v for k, v in DDL_ONLY_EXCLUSIONS.items() if k != t}
+    assert _with_not_synced(s, {t: "export만 함"}, ddl_only) == []
+
+
+def test_unsynced_table_without_exclusion_is_still_reported(sets: dict[str, set[str]]) -> None:
+    t = "kis_stock_status_daily"
+    s = _mutated(sets, raw_toml=sets["raw_toml"] | {t}, raw_sh=sets["raw_sh"] | {t})
+    ddl_only = {k: v for k, v in DDL_ONLY_EXCLUSIONS.items() if k != t}
+    text = "\n".join(_with_not_synced(s, {}, ddl_only))
+    assert t in text and "NOT_SYNCED_EXCLUSIONS" in text
+
+
+def test_detects_not_synced_table_that_is_in_sync(sets: dict[str, set[str]]) -> None:
+    problems = _with_not_synced(sets, {"daily_ohlcv": "x"})
+    assert any(
+        "daily_ohlcv" in p
+        and "SYNC_TABLE_SPECS" in p
+        and "NOT_SYNCED_EXCLUSIONS에서 지우십시오" in p
+        for p in problems
+    )
+
+
+def test_detects_not_synced_table_not_in_ddl(sets: dict[str, set[str]]) -> None:
+    problems = _with_not_synced(sets, {"ghost_table": "x"})
+    assert any("ghost_table" in p and "DDL에 표가 없음" in p for p in problems)
+
+
+def test_detects_not_synced_table_not_exported(sets: dict[str, set[str]]) -> None:
+    t = "kis_stock_status_daily"  # in DDL, in neither sync nor export
+    problems = _with_not_synced(sets, {t: "x"}, {})
+    assert any(t in p and "NOT_SYNCED_EXCLUSIONS" in p and "export" in p for p in problems)
+
+
+def test_detects_table_in_both_not_synced_and_ddl_only(sets: dict[str, set[str]]) -> None:
+    t = "kis_stock_status_daily"
+    s = _mutated(sets, raw_toml=sets["raw_toml"] | {t}, raw_sh=sets["raw_sh"] | {t})
+    problems = _with_not_synced(s, {t: "x"})
+    assert any(t in p and "모두 있음" in p for p in problems)
