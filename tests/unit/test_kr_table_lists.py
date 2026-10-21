@@ -39,13 +39,15 @@ DDL_ONLY_EXCLUSIONS: dict[str, str] = {
     "ingestion_runs": "실행 기록(bookkeeping)이라 미러·export 대상이 아님",
     "sync_checkpoints": "체크포인트(bookkeeping)라 미러·export 대상이 아님",
     "collection_slice_state": "수집 슬라이스 상태(bookkeeping)라 미러·export 대상이 아님",
-    # 2026-10-07 추가. 사용자 결정 대기:
-    # my/milestones/common/20261020_collector_refactoring/01_plan.md R1
-    "dart_exchange_notice_raw": "확인 필요: 사용자 결정 대기(01_plan.md R1). 등록 여부 미정",
-    "dart_exchange_notice_window": "확인 필요: 사용자 결정 대기(01_plan.md R1). 등록 여부 미정",
+    "dart_exchange_notice_window": "거래소공시 수집 진행 장부(bookkeeping)라 미러·export 안 함",
+    # export 대기 (결정 ⑮, 2026-10-07): modeler verify_raw·compute_all이 raw 표 집합을
+    # 그대로 요구하므로, 11월 modeler 선택 표 변경과 같은 날 export에 넣는다. 그날
+    # remote_sync에는 넣지 않고 NOT_SYNCED_EXCLUSIONS로 옮긴다 (2026-10-21 결정,
+    # my/milestones/common/20261020_collector_refactoring/README.md §5).
+    "dart_exchange_notice_raw": "export 대기(결정 ⑮) — 그날 NOT_SYNCED_EXCLUSIONS로 옮긴다",
     "kis_stock_status_daily": (
-        "확인 필요: 사용자 결정 대기(01_plan.md R1). "
-        "export 등록은 브랜치 kr-4-2b-export-registration에 있음"
+        "export 대기(결정 ⑮, 등록 커밋은 kr-4-2b-export-registration) "
+        "— 그날 NOT_SYNCED_EXCLUSIONS로 옮긴다"
     ),
 }
 
@@ -53,17 +55,17 @@ DDL_ONLY_EXCLUSIONS: dict[str, str] = {
 # remote_sync has been a dev-only path since 2026-09-30, so a new table may reasonably be
 # exported without being synced. Such a table must be in export_tables.toml and the shell
 # arrays, must not be in SYNC_TABLE_SPECS, and must not also be in DDL_ONLY_EXCLUSIONS.
-# Empty on purpose. First candidate: kis_stock_status_daily, once branch
-# kr-4-2b-export-registration merges (it adds the table to export but not to sync).
-# Pending a user decision recorded in
-# my/milestones/common/20261020_collector_refactoring/README.md section 6.
+# Empty until the 결정 ⑮ export day: then kis_stock_status_daily (branch
+# kr-4-2b-export-registration) and dart_exchange_notice_raw move here from
+# DDL_ONLY_EXCLUSIONS (2026-10-21 decision,
+# my/milestones/common/20261020_collector_refactoring/README.md section 5).
 NOT_SYNCED_EXCLUSIONS: dict[str, str] = {}
 
 # Names in the sync specs / raw export that are no longer DDL tables.
 DROPPED_TABLE_EXCLUSIONS: dict[str, str] = {
     name: (
         "sql/migrations/20260728_drop_derived_tables.sql 로 DROP됨. "
-        "remote_sync에 spec이 남아 있음. 삭제는 결정 대기"
+        "remote_sync에 spec이 남아 있음. R4a ⓪에서 spec을 지우고 여기서도 뺀다(2026-10-21 결정)"
     )
     for name in (
         "metric_catalog",
