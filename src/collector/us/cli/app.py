@@ -230,6 +230,23 @@ def _handle_nasdaq_analyst_run(args: argparse.Namespace) -> None:
         raise SystemExit(1)
 
 
+def _handle_nasdaq_earnings_forward_run(args: argparse.Namespace) -> None:
+    from collector.us.sources import nasdaq_earnings_forward as fwd
+
+    result = fwd.run_forward(
+        _root(args),
+        horizon_days=args.horizon_days,
+        observed=dt.date.fromisoformat(args.observed_date) if args.observed_date else None,
+        interval_seconds=args.interval_seconds,
+        max_retries=args.max_retries,
+        dry_run=args.dry_run,
+        ignore_block=args.ignore_block,
+    )
+    _print(result)
+    if not result["ok"]:
+        raise SystemExit(1)
+
+
 def _handle_prune(args: argparse.Namespace) -> None:
     from collector.us.ops import retention
     from collector.us.store.schema import ARROW_SCHEMAS
@@ -496,3 +513,48 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     )
     nasdaq_run.add_argument("--dry-run", action="store_true", help="할 일만 센다.")
     nasdaq_run.set_defaults(handler=_handle_nasdaq_analyst_run)
+
+    fwd_parser = subparsers.add_parser(
+        "us-nasdaq-earnings-forward",
+        help="Nasdaq 실적 캘린더의 미래 날짜 칸을 관측일마다 쌓는다 (전진 축적 전용).",
+    )
+    fwd_sub = fwd_parser.add_subparsers(dest="us_nasdaq_earnings_forward_command", required=True)
+    fwd_run = fwd_sub.add_parser(
+        "run",
+        help="관측일 다음 날부터 horizon일까지의 평일을 받는다. 같은 날 다시 돌려도 안전하다.",
+    )
+    fwd_run.add_argument(
+        "--lake-root",
+        default=None,
+        help="변형 lake 경로. 기본은 $STOCK_DATA_ROOT/us 다 (D9).",
+    )
+    fwd_run.add_argument(
+        "--horizon-days",
+        type=int,
+        default=14,
+        help="관측일 뒤로 몇 달력일까지 받나 (기본 14). 매일 14, 주 1회 100.",
+    )
+    fwd_run.add_argument(
+        "--observed-date",
+        default=None,
+        help="관측일 T (YYYY-MM-DD). 기본은 실행하는 오늘.",
+    )
+    fwd_run.add_argument(
+        "--max-retries",
+        type=int,
+        default=1,
+        help="네트워크 오류(시간 초과 등)만 다시 시도하는 횟수. HTTP·형식 오류는 다시 하지 않는다.",
+    )
+    fwd_run.add_argument(
+        "--ignore-block",
+        action="store_true",
+        help="쉬는 기한(_blocked.json) 안이어도 돌린다. 손으로 한 번 확인할 때만 쓴다.",
+    )
+    fwd_run.add_argument(
+        "--interval-seconds",
+        type=float,
+        default=None,
+        help="요청 간격 (기본 5초).",
+    )
+    fwd_run.add_argument("--dry-run", action="store_true", help="할 일만 센다.")
+    fwd_run.set_defaults(handler=_handle_nasdaq_earnings_forward_run)
