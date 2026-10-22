@@ -40,6 +40,9 @@ DDL_ONLY_EXCLUSIONS: dict[str, str] = {
     "sync_checkpoints": "체크포인트(bookkeeping)라 미러·export 대상이 아님",
     "collection_slice_state": "수집 슬라이스 상태(bookkeeping)라 미러·export 대상이 아님",
     "dart_exchange_notice_window": "거래소공시 수집 진행 장부(bookkeeping)라 미러·export 안 함",
+    "daily_ohlcv_regular_fix_audit": (
+        "정규장 가격 보정 감사 기록(bookkeeping)이라 미러·export 안 함 (v0.18.1, 10-22)"
+    ),
     # export 대기 (결정 ⑮, 2026-10-07): modeler verify_raw·compute_all이 raw 표 집합을
     # 그대로 요구하므로, 11월 modeler 선택 표 변경과 같은 날 export에 넣는다. 그날
     # remote_sync에는 넣지 않고 NOT_SYNCED_EXCLUSIONS로 옮긴다 (2026-10-21 결정,
