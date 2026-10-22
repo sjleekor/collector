@@ -149,6 +149,44 @@ CREATE INDEX IF NOT EXISTS ix_daily_market_cap_ticker_date
 CREATE INDEX IF NOT EXISTS ix_daily_market_cap_sync_cursor
     ON daily_market_cap (fetched_at, trade_date, ticker, market);
 
+-- 4c) daily_ohlcv_regular_fix_audit ─ old -> new of `prices fix-regular-session` (2026-10-19).
+--
+-- 2026-09-14 KRX 시간외 도입 뒤 naver의 고가·저가·종가가 정규장 값과 달라져, KRX 정규장 원시가
+-- (daily_market_cap.source_*)에 naver 시가 비율 f를 곱해 daily_ohlcv를 고친다. 고친 행마다 남긴다.
+CREATE TABLE IF NOT EXISTS daily_ohlcv_regular_fix_audit (
+    audit_id      BIGSERIAL        PRIMARY KEY,
+    run_id        UUID             NOT NULL,
+    applied_at    TIMESTAMPTZ      NOT NULL,
+    trade_date    DATE             NOT NULL,
+    ticker        TEXT             NOT NULL,
+    market        TEXT             NOT NULL,
+    old_high      BIGINT           NOT NULL,
+    old_low       BIGINT           NOT NULL,
+    old_close     BIGINT           NOT NULL,
+    new_high      BIGINT           NOT NULL,
+    new_low       BIGINT           NOT NULL,
+    new_close     BIGINT           NOT NULL,
+    naver_open    BIGINT           NOT NULL,
+    krx_open      BIGINT           NOT NULL,
+    krx_high      BIGINT           NOT NULL,
+    krx_low       BIGINT           NOT NULL,
+    krx_close     BIGINT           NOT NULL,
+    factor        DOUBLE PRECISION NOT NULL,
+    factor_basis  TEXT             NOT NULL,   -- own | prev_day
+    krx_source    TEXT             NOT NULL    -- daily_market_cap | ...
+);
+
+-- 18:30 naver 재수집이 같은 행을 다시 덮고 20:00 이후 같은 값으로 다시 고치면 같은
+-- old -> new가 되풀이된다. 같은 변경은 한 번만 남긴다 (INSERT ... ON CONFLICT DO NOTHING).
+CREATE UNIQUE INDEX IF NOT EXISTS ux_daily_ohlcv_regular_fix_audit_change
+    ON daily_ohlcv_regular_fix_audit (
+        trade_date, ticker, market,
+        old_high, old_low, old_close, new_high, new_low, new_close
+    );
+
+CREATE INDEX IF NOT EXISTS ix_daily_ohlcv_regular_fix_audit_run
+    ON daily_ohlcv_regular_fix_audit (run_id);
+
 -- 5) ingestion_runs ─ audit log for every pipeline execution
 CREATE TABLE IF NOT EXISTS ingestion_runs (
     run_id          UUID        PRIMARY KEY,

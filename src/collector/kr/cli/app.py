@@ -8,6 +8,7 @@ Subcommands::
     collector universe sync  [--source fdr|pykrx] [--markets ...]
     collector prices backfill [--market ...] [--tickers ...] [--start ...]
     collector prices market-cap-backfill [--market ...] [--start ...] [--end ...]
+    collector prices fix-regular-session (--start ... --end ... | --last-trading-days N) [--dry-run]
     collector index sync --source krx-openapi [--groups kospi,kosdaq,krx]
                          (--start ... --end ... | --incremental --lookback-days N)
     collector validate       [--date ...] [--market ...]
@@ -2862,6 +2863,81 @@ def _handle_prices_backfill(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+def _build_regular_session_source(args: argparse.Namespace, storage: object) -> object | None:
+    """Pick the KRX input for ``prices fix-regular-session`` (None = daily_market_cap)."""
+    if args.source == "market-cap":
+        return None
+
+    from collector.kr.adapters.krx_common.client import KrxMdcClient
+    from collector.kr.service.regular_session_sources import CombinedSource, KrxMdcSameDaySource
+
+    settings = get_settings()
+    client = KrxMdcClient(
+        login_id=settings.krx_id,
+        login_pw=settings.krx_pw,
+        human_throttle=_build_krx_throttle(args),  # type: ignore[arg-type]
+    )
+    mdc = KrxMdcSameDaySource(client, allow_early=args.allow_early_mdc)
+    if args.source == "mdc":
+        return mdc
+    return CombinedSource(storage, mdc)  # type: ignore[arg-type]
+
+
+def _handle_prices_fix_regular_session(args: argparse.Namespace) -> None:
+    """Handle ``collector prices fix-regular-session``.
+
+    Rewrites ``daily_ohlcv`` high/low/close from KRX regular-session values (see
+    ``service/fix_regular_session.py``). Reads only the database; no source is called.
+    """
+    from collector.kr.infra.db_postgres.repositories import PostgresStorage
+    from collector.kr.service.fix_regular_session import fix_regular_session, resolve_window
+
+    storage = PostgresStorage(get_settings().db_dsn)
+    try:
+        window = resolve_window(storage, args.start, args.end, args.last_trading_days)
+    except ValueError as exc:
+        print(f"❌ {exc}", file=sys.stderr)
+        sys.exit(2)
+    if window is None:
+        print("❌ daily_ohlcv is empty; nothing to fix.", file=sys.stderr)
+        sys.exit(1)
+    start, end = window
+
+    print(
+        f"→ prices fix-regular-session: start={start}, end={end}, dry_run={args.dry_run}, "
+        f"allow_before_cutoff={args.allow_before_cutoff}, source={args.source}"
+    )
+    source = _build_regular_session_source(args, storage)
+    report, _run = fix_regular_session(
+        storage,
+        start,
+        end,
+        source=source,
+        dry_run=args.dry_run,
+        allow_before_cutoff=args.allow_before_cutoff,
+    )
+    label = "would change" if args.dry_run else "changed"
+    changed = len(report.plans) if args.dry_run else report.applied
+    print(f"✅ Regular-session fix {'(dry run) ' if args.dry_run else ''}completed.")
+    print(f"   - Rows {label}:      {changed}")
+    print(f"   - Rows already right: {report.unchanged}")
+    print(f"   - Audit rows (new):   {report.audit_rows_new}")
+    for reason, count in sorted(report.skipped_by_reason().items()):
+        print(f"   - Skipped {reason}: {count}")
+    rejected: dict[str, int] = {}
+    for _key, reason in report.source_rejected:
+        rejected[reason] = rejected.get(reason, 0) + 1
+    for reason, count in sorted(rejected.items()):
+        print(f"   - Source rejected {reason}: {count}")
+    if args.dry_run:
+        for plan in report.plans[: args.show]:
+            print(
+                f"     {plan.trade_date} {plan.ticker} f={plan.factor:.6f}({plan.factor_basis}) "
+                f"H {plan.old_high}->{plan.new_high} L {plan.old_low}->{plan.new_low} "
+                f"C {plan.old_close}->{plan.new_close}"
+            )
+
+
 def _handle_prices_market_cap_backfill(args: argparse.Namespace) -> None:
     """Handle ``collector prices market-cap-backfill``."""
     settings = get_settings()
@@ -5292,6 +5368,55 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     prices_market_cap.set_defaults(handler=_handle_prices_market_cap_backfill)
+
+    prices_fix = prices_sub.add_parser(
+        "fix-regular-session",
+        help=(
+            "Rewrite daily_ohlcv high/low/close from KRX regular-session values "
+            "(round(KRX x naver_open/KRX_open)); open and volume are untouched."
+        ),
+    )
+    prices_fix.add_argument("--start", type=_parse_date, default=None)
+    prices_fix.add_argument("--end", type=_parse_date, default=None)
+    prices_fix.add_argument(
+        "--last-trading-days",
+        type=int,
+        default=None,
+        help="Cover the N most recent stored trade dates instead of --start/--end.",
+    )
+    prices_fix.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="Plan and report only; write nothing (no ingestion_runs row either).",
+    )
+    prices_fix.add_argument(
+        "--allow-before-cutoff",
+        action="store_true",
+        default=False,
+        help="Also fix dates before 2026-09-14 (they already match KRX; for verification).",
+    )
+    prices_fix.add_argument(
+        "--source",
+        choices=("market-cap", "mdc", "combined"),
+        default="market-cap",
+        help=(
+            "KRX input. market-cap (default): daily_market_cap, one trading day late. "
+            "mdc: same-day MDCSTAT01501 (scrapes data.krx.co.kr). combined: market-cap first, "
+            "MDC only for days it has not delivered; market-cap overwrites on the next run."
+        ),
+    )
+    prices_fix.add_argument(
+        "--allow-early-mdc",
+        action="store_true",
+        default=False,
+        help="Allow same-day MDC before 20:30 KST (after-market still settling; not advised).",
+    )
+    _add_krx_throttle_arguments(prices_fix)
+    prices_fix.add_argument(
+        "--show", type=int, default=20, help="With --dry-run, print this many planned rows."
+    )
+    prices_fix.set_defaults(handler=_handle_prices_fix_regular_session)
 
     # -- index ----------------------------------------------------------------
     index_parser = subparsers.add_parser("index", help="KRX index level commands.")
