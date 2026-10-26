@@ -222,8 +222,25 @@ class KrxOpenApiClient:
 
             outcome = self._classify(response)
             if outcome == "ok":
+                try:
+                    body = response.json()
+                except ValueError:
+                    body = None
+                    problem = "body is not JSON"
+                else:
+                    problem = "" if isinstance(body, dict) else "body is not a JSON object"
+                if problem:
+                    # HTTP 200 is not success: an HTML error page or a cut-off
+                    # body takes the same retry path as a 5xx.
+                    self.counters.http_errors += 1
+                    last_error = (
+                        f"HTTP {response.status_code}: {problem}: {self._snippet(response)}"
+                    )
+                    if attempt < self._max_attempts:
+                        self._sleep_fn(min(2.0 * attempt, 10.0))
+                        continue
+                    break
                 self._record_throttle_waits()
-                body = response.json()
                 rows = body.get(RESPONSE_ROWS_KEY)
                 return list(rows) if isinstance(rows, list) else []
 
@@ -415,6 +432,11 @@ class KrxOpenApiClient:
             return "retryable"
 
         return "error"
+
+    @staticmethod
+    def _snippet(response: requests.Response) -> str:
+        """First 80 characters of the body on one line (never headers or params)."""
+        return " ".join((response.text or "")[:80].split())
 
     @staticmethod
     def _is_quota(message: str) -> bool:
