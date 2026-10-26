@@ -120,21 +120,23 @@ def sync_dart_xbrl(
                 "No active OpenDART corp mappings found. Run `dart sync-corp` first."
             )
 
-        financial_rows = storage.get_dart_financial_statement_raw(bsns_years, reprt_codes, tickers)
+        receipt_keys = storage.get_dart_financial_statement_receipt_keys(
+            bsns_years, reprt_codes, tickers
+        )
         request_targets: dict[tuple[str, int, str, str], tuple[str, int, str, str]] = {}
-        for row in financial_rows:
-            if not row.ticker or not row.rcept_no:
+        for ticker, bsns_year, reprt_code, rcept_no in receipt_keys:
+            if not ticker or not rcept_no:
                 continue
-            row_corp = corp_by_ticker.get(row.ticker)
+            row_corp = corp_by_ticker.get(ticker)
             if not slot_allowed(
                 allowed_year_report_pairs,
                 retry_slots,
                 row_corp.corp_code if row_corp is not None else "",
-                row.bsns_year,
-                row.reprt_code,
+                bsns_year,
+                reprt_code,
             ):
                 continue
-            key = (row.ticker, row.bsns_year, row.reprt_code, row.rcept_no)
+            key = (ticker, bsns_year, reprt_code, rcept_no)
             request_targets.setdefault(key, key)
 
         if not request_targets:
