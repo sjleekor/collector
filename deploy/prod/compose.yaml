@@ -19,7 +19,7 @@ services:
       retries: 5
 
   collector:
-    image: ghcr.io/sjleekor/collector:v0.18.2
+    image: ghcr.io/sjleekor/collector:v0.18.3
     profiles: ["manual"]
     # 중단 신호 (2026-10-07). Cronicle은 abort 때 TERM을 보내고 child_kill_timeout
     # 10초 뒤 KILL을 보낸다. wrapper가 `docker stop -t 5`로 컨테이너를 세우므로
